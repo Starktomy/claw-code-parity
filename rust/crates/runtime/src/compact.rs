@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 
 const COMPACT_CONTINUATION_PREAMBLE: &str =
@@ -119,14 +120,14 @@ pub fn compact_session(session: &Session, config: CompactionConfig) -> Compactio
     }];
     compacted_messages.extend(preserved);
 
-    let mut compacted_session = session.clone();
-    compacted_session.messages = compacted_messages;
-    compacted_session.record_compaction(summary.clone(), removed.len());
-
     CompactionResult {
         summary,
         formatted_summary,
-        compacted_session,
+        compacted_session: Session {
+            version: session.version,
+            messages: compacted_messages,
+            capabilities: Arc::clone(&session.capabilities),
+        },
         removed_message_count: removed.len(),
     }
 }
@@ -507,6 +508,7 @@ mod tests {
         get_compact_continuation_message, infer_pending_work, should_compact, CompactionConfig,
     };
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+    use std::sync::Arc;
 
     #[test]
     fn formats_compact_summary_like_upstream() {
@@ -516,8 +518,11 @@ mod tests {
 
     #[test]
     fn leaves_small_sessions_unchanged() {
-        let mut session = Session::new();
-        session.messages = vec![ConversationMessage::user_text("hello")];
+        let session = Session {
+            version: 1,
+            messages: vec![ConversationMessage::user_text("hello")],
+            capabilities: Arc::new(identity::CapabilityRegistry::new(identity::CapabilityMode::DenyAll)),
+        };
 
         let result = compact_session(&session, CompactionConfig::default());
         assert_eq!(result.removed_message_count, 0);
@@ -528,21 +533,24 @@ mod tests {
 
     #[test]
     fn compacts_older_messages_into_a_system_summary() {
-        let mut session = Session::new();
-        session.messages = vec![
-            ConversationMessage::user_text("one ".repeat(200)),
-            ConversationMessage::assistant(vec![ContentBlock::Text {
-                text: "two ".repeat(200),
-            }]),
-            ConversationMessage::tool_result("1", "bash", "ok ".repeat(200), false),
-            ConversationMessage {
-                role: MessageRole::Assistant,
-                blocks: vec![ContentBlock::Text {
-                    text: "recent".to_string(),
-                }],
-                usage: None,
-            },
-        ];
+        let session = Session {
+            version: 1,
+            messages: vec![
+                ConversationMessage::user_text("one ".repeat(200)),
+                ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "two ".repeat(200),
+                }]),
+                ConversationMessage::tool_result("1", "bash", "ok ".repeat(200), false),
+                ConversationMessage {
+                    role: MessageRole::Assistant,
+                    blocks: vec![ContentBlock::Text {
+                        text: "recent".to_string(),
+                    }],
+                    usage: None,
+                },
+            ],
+            capabilities: Arc::new(identity::CapabilityRegistry::new(identity::CapabilityMode::DenyAll)),
+        };
 
         let result = compact_session(
             &session,
@@ -577,17 +585,22 @@ mod tests {
 
     #[test]
     fn keeps_previous_compacted_context_when_compacting_again() {
-        let mut initial_session = Session::new();
-        initial_session.messages = vec![
-            ConversationMessage::user_text("Investigate rust/crates/runtime/src/compact.rs"),
-            ConversationMessage::assistant(vec![ContentBlock::Text {
-                text: "I will inspect the compact flow.".to_string(),
-            }]),
-            ConversationMessage::user_text("Also update rust/crates/runtime/src/conversation.rs"),
-            ConversationMessage::assistant(vec![ContentBlock::Text {
-                text: "Next: preserve prior summary context during auto compact.".to_string(),
-            }]),
-        ];
+        let initial_session = Session {
+            version: 1,
+            messages: vec![
+                ConversationMessage::user_text("Investigate rust/crates/runtime/src/compact.rs"),
+                ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "I will inspect the compact flow.".to_string(),
+                }]),
+                ConversationMessage::user_text(
+                    "Also update rust/crates/runtime/src/conversation.rs",
+                ),
+                ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "Next: preserve prior summary context during auto compact.".to_string(),
+                }]),
+            ],
+            capabilities: Arc::new(identity::CapabilityRegistry::new(identity::CapabilityMode::DenyAll)),
+        };
         let config = CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 1,
@@ -602,9 +615,14 @@ mod tests {
             }]),
         ]);
 
-        let mut second_session = Session::new();
-        second_session.messages = follow_up_messages;
-        let second = compact_session(&second_session, config);
+        let second = compact_session(
+            &Session {
+                version: 1,
+                messages: follow_up_messages,
+                capabilities: Arc::new(identity::CapabilityRegistry::new(identity::CapabilityMode::DenyAll)),
+            },
+            config,
+        );
 
         assert!(second
             .formatted_summary
@@ -633,20 +651,23 @@ mod tests {
     #[test]
     fn ignores_existing_compacted_summary_when_deciding_to_recompact() {
         let summary = "<summary>Conversation summary:\n- Scope: earlier work preserved.\n- Key timeline:\n  - user: large preserved context\n</summary>";
-        let mut session = Session::new();
-        session.messages = vec![
-            ConversationMessage {
-                role: MessageRole::System,
-                blocks: vec![ContentBlock::Text {
-                    text: get_compact_continuation_message(summary, true, true),
-                }],
-                usage: None,
-            },
-            ConversationMessage::user_text("tiny"),
-            ConversationMessage::assistant(vec![ContentBlock::Text {
-                text: "recent".to_string(),
-            }]),
-        ];
+        let session = Session {
+            version: 1,
+            messages: vec![
+                ConversationMessage {
+                    role: MessageRole::System,
+                    blocks: vec![ContentBlock::Text {
+                        text: get_compact_continuation_message(summary, true, true),
+                    }],
+                    usage: None,
+                },
+                ConversationMessage::user_text("tiny"),
+                ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "recent".to_string(),
+                }]),
+            ],
+            capabilities: Arc::new(identity::CapabilityRegistry::new(identity::CapabilityMode::DenyAll)),
+        };
 
         assert!(!should_compact(
             &session,
@@ -669,10 +690,10 @@ mod tests {
     #[test]
     fn extracts_key_files_from_message_content() {
         let files = collect_key_files(&[ConversationMessage::user_text(
-            "Update rust/crates/runtime/src/compact.rs and rust/crates/rusty-claude-cli/src/main.rs next.",
+            "Update rust/crates/runtime/src/compact.rs and rust/crates/tools/src/lib.rs next.",
         )]);
         assert!(files.contains(&"rust/crates/runtime/src/compact.rs".to_string()));
-        assert!(files.contains(&"rust/crates/rusty-claude-cli/src/main.rs".to_string()));
+        assert!(files.contains(&"rust/crates/tools/src/lib.rs".to_string()));
     }
 
     #[test]

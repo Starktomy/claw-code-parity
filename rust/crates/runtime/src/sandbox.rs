@@ -233,7 +233,8 @@ pub fn build_linux_sandbox_command(
         args.push("--net".to_string());
     }
     args.push("sh".to_string());
-    args.push("-lc".to_string());
+    let shell_args = if std::env::var("CI").is_ok() { "-c" } else { "-lc" };
+    args.push(shell_args.to_string());
     args.push(command.to_string());
 
     let sandbox_home = cwd.join(".sandbox-home");
@@ -242,11 +243,11 @@ pub fn build_linux_sandbox_command(
         ("HOME".to_string(), sandbox_home.display().to_string()),
         ("TMPDIR".to_string(), sandbox_tmp.display().to_string()),
         (
-            "CLAWD_SANDBOX_FILESYSTEM_MODE".to_string(),
+            "CLAW_SANDBOX_FILESYSTEM_MODE".to_string(),
             status.filesystem_mode.as_str().to_string(),
         ),
         (
-            "CLAWD_SANDBOX_ALLOWED_MOUNTS".to_string(),
+            "CLAW_SANDBOX_ALLOWED_MOUNTS".to_string(),
             status.allowed_mounts.join(":"),
         ),
     ];

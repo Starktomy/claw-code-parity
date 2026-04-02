@@ -3,8 +3,6 @@ use std::collections::BTreeMap;
 use crate::config::{McpOAuthConfig, McpServerConfig, ScopedMcpServerConfig};
 use crate::mcp::{mcp_server_signature, mcp_tool_prefix, normalize_name_for_mcp};
 
-pub const DEFAULT_MCP_TOOL_CALL_TIMEOUT_MS: u64 = 60_000;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpClientTransport {
     Stdio(McpStdioTransport),
@@ -20,7 +18,6 @@ pub struct McpStdioTransport {
     pub command: String,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
-    pub tool_call_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,7 +75,6 @@ impl McpClientTransport {
                 command: config.command.clone(),
                 args: config.args.clone(),
                 env: config.env.clone(),
-                tool_call_timeout_ms: config.tool_call_timeout_ms,
             }),
             McpServerConfig::Sse(config) => Self::Sse(McpRemoteTransport {
                 url: config.url.clone(),
@@ -106,14 +102,6 @@ impl McpClientTransport {
                 id: config.id.clone(),
             }),
         }
-    }
-}
-
-impl McpStdioTransport {
-    #[must_use]
-    pub fn resolved_tool_call_timeout_ms(&self) -> u64 {
-        self.tool_call_timeout_ms
-            .unwrap_or(DEFAULT_MCP_TOOL_CALL_TIMEOUT_MS)
     }
 }
 
@@ -148,7 +136,6 @@ mod tests {
                 command: "uvx".to_string(),
                 args: vec!["mcp-server".to_string()],
                 env: BTreeMap::from([("TOKEN".to_string(), "secret".to_string())]),
-                tool_call_timeout_ms: Some(15_000),
             }),
         };
 
@@ -167,7 +154,6 @@ mod tests {
                     transport.env.get("TOKEN").map(String::as_str),
                     Some("secret")
                 );
-                assert_eq!(transport.tool_call_timeout_ms, Some(15_000));
             }
             other => panic!("expected stdio transport, got {other:?}"),
         }
