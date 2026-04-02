@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use identity::Capability;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PermissionMode {
@@ -50,14 +51,27 @@ pub enum PermissionOutcome {
 pub struct PermissionPolicy {
     active_mode: PermissionMode,
     tool_requirements: BTreeMap<String, PermissionMode>,
+    tool_capabilities: BTreeMap<String, Capability>,
 }
 
 impl PermissionPolicy {
     #[must_use]
     pub fn new(active_mode: PermissionMode) -> Self {
+        let mut tool_capabilities = BTreeMap::new();
+        // Default mappings
+        tool_capabilities.insert("bash".to_string(), Capability::ExecuteCommands);
+        tool_capabilities.insert("read_file".to_string(), Capability::ReadFiles);
+        tool_capabilities.insert("write_file".to_string(), Capability::WriteFiles);
+        tool_capabilities.insert("edit_file".to_string(), Capability::WriteFiles);
+        tool_capabilities.insert("glob_search".to_string(), Capability::ReadFiles);
+        tool_capabilities.insert("grep_search".to_string(), Capability::ReadFiles);
+        tool_capabilities.insert("WebFetch".to_string(), Capability::WebFetch);
+        tool_capabilities.insert("WebSearch".to_string(), Capability::WebFetch);
+
         Self {
             active_mode,
             tool_requirements: BTreeMap::new(),
+            tool_capabilities,
         }
     }
 
@@ -78,6 +92,11 @@ impl PermissionPolicy {
     }
 
     #[must_use]
+    pub fn capability_for(&self, tool_name: &str) -> Option<Capability> {
+        self.tool_capabilities.get(tool_name).cloned()
+    }
+
+    #[must_use]
     pub fn required_mode_for(&self, tool_name: &str) -> PermissionMode {
         self.tool_requirements
             .get(tool_name)
@@ -92,6 +111,27 @@ impl PermissionPolicy {
         input: &str,
         mut prompter: Option<&mut dyn PermissionPrompter>,
     ) -> PermissionOutcome {
+        self.authorize_with_capabilities(tool_name, input, prompter, None)
+    }
+
+    #[must_use]
+    pub fn authorize_with_capabilities(
+        &self,
+        tool_name: &str,
+        input: &str,
+        mut prompter: Option<&mut dyn PermissionPrompter>,
+        capability_registry: Option<&identity::CapabilityRegistry>,
+    ) -> PermissionOutcome {
+        // 1. Check fine-grained capabilities if registry is provided
+        if let (Some(registry), Some(cap)) = (capability_registry, self.capability_for(tool_name)) {
+            if !registry.can_execute(&cap) {
+                return PermissionOutcome::Deny {
+                    reason: format!("capability {:?} required for tool '{}' is not granted", cap, tool_name),
+                };
+            }
+        }
+
+        // 2. Fallback to legacy PermissionMode logic
         let current_mode = self.active_mode();
         let required_mode = self.required_mode_for(tool_name);
         if current_mode == PermissionMode::Allow || current_mode >= required_mode {
@@ -228,5 +268,22 @@ mod tests {
             policy.authorize("bash", "echo hi", Some(&mut prompter)),
             PermissionOutcome::Deny { reason } if reason == "not now"
         ));
+    }
+
+    #[tokio::test]
+    async fn honors_fine_grained_capabilities() {
+        use identity::{Capability, CapabilityMode, CapabilityRegistry};
+
+        let policy = PermissionPolicy::new(PermissionMode::Allow); // Legacy mode allows everything
+        let registry = CapabilityRegistry::new(CapabilityMode::Restrict);
+        
+        // Even if legacy mode allows, if capability is missing in Restrict mode, it should deny
+        let outcome = policy.authorize_with_capabilities("bash", "ls", None, Some(&registry));
+        assert!(matches!(outcome, PermissionOutcome::Deny { .. }));
+
+        // Grant capability
+        registry.grant(Capability::ExecuteCommands);
+        let outcome = policy.authorize_with_capabilities("bash", "ls", None, Some(&registry));
+        assert_eq!(outcome, PermissionOutcome::Allow);
     }
 }

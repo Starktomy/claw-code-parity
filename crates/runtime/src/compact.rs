@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 
 const COMPACT_CONTINUATION_PREAMBLE: &str =
@@ -125,6 +126,7 @@ pub fn compact_session(session: &Session, config: CompactionConfig) -> Compactio
         compacted_session: Session {
             version: session.version,
             messages: compacted_messages,
+            capabilities: Arc::clone(&session.capabilities),
         },
         removed_message_count: removed.len(),
     }
@@ -506,6 +508,7 @@ mod tests {
         get_compact_continuation_message, infer_pending_work, should_compact, CompactionConfig,
     };
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+    use std::sync::Arc;
 
     #[test]
     fn formats_compact_summary_like_upstream() {
@@ -518,6 +521,7 @@ mod tests {
         let session = Session {
             version: 1,
             messages: vec![ConversationMessage::user_text("hello")],
+            capabilities: Arc::new(identity::CapabilityRegistry::new(identity::CapabilityMode::DenyAll)),
         };
 
         let result = compact_session(&session, CompactionConfig::default());
@@ -545,6 +549,7 @@ mod tests {
                     usage: None,
                 },
             ],
+            capabilities: Arc::new(identity::CapabilityRegistry::new(identity::CapabilityMode::DenyAll)),
         };
 
         let result = compact_session(
@@ -594,6 +599,7 @@ mod tests {
                     text: "Next: preserve prior summary context during auto compact.".to_string(),
                 }]),
             ],
+            capabilities: Arc::new(identity::CapabilityRegistry::new(identity::CapabilityMode::DenyAll)),
         };
         let config = CompactionConfig {
             preserve_recent_messages: 2,
@@ -613,6 +619,7 @@ mod tests {
             &Session {
                 version: 1,
                 messages: follow_up_messages,
+                capabilities: Arc::new(identity::CapabilityRegistry::new(identity::CapabilityMode::DenyAll)),
             },
             config,
         );
@@ -659,6 +666,7 @@ mod tests {
                     text: "recent".to_string(),
                 }]),
             ],
+            capabilities: Arc::new(identity::CapabilityRegistry::new(identity::CapabilityMode::DenyAll)),
         };
 
         assert!(!should_compact(

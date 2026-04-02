@@ -200,10 +200,19 @@ where
 
             for (tool_use_id, tool_name, input) in pending_tool_uses {
                 let permission_outcome = if let Some(prompt) = prompter.as_mut() {
-                    self.permission_policy
-                        .authorize(&tool_name, &input, Some(*prompt))
+                    self.permission_policy.authorize_with_capabilities(
+                        &tool_name,
+                        &input,
+                        Some(*prompt),
+                        Some(&self.session.capabilities),
+                    )
                 } else {
-                    self.permission_policy.authorize(&tool_name, &input, None)
+                    self.permission_policy.authorize_with_capabilities(
+                        &tool_name,
+                        &input,
+                        None,
+                        Some(&self.session.capabilities),
+                    )
                 };
 
                 let result_message = match permission_outcome {

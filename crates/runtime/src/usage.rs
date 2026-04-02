@@ -213,6 +213,7 @@ impl UsageTracker {
 mod tests {
     use super::{format_usd, pricing_for_model, TokenUsage, UsageTracker};
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+    use std::sync::Arc;
 
     #[test]
     fn tracks_true_cumulative_usage() {
@@ -301,6 +302,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                 }),
             }],
+            capabilities: Arc::new(identity::CapabilityRegistry::new(identity::CapabilityMode::DenyAll)),
         };
 
         let tracker = UsageTracker::from_session(&session);

@@ -1,7 +1,6 @@
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,6 +22,7 @@ pub enum CapabilityMode {
     Restrict,
 }
 
+#[derive(Debug)]
 pub struct CapabilityRegistry {
     mode: CapabilityMode,
     allowed: RwLock<HashSet<Capability>>,
@@ -36,22 +36,22 @@ impl CapabilityRegistry {
         }
     }
 
-    pub async fn grant(&self, cap: Capability) {
-        let mut allowed = self.allowed.write().await;
+    pub fn grant(&self, cap: Capability) {
+        let mut allowed = self.allowed.write();
         allowed.insert(cap);
     }
 
-    pub async fn revoke(&self, cap: &Capability) {
-        let mut allowed = self.allowed.write().await;
+    pub fn revoke(&self, cap: &Capability) {
+        let mut allowed = self.allowed.write();
         allowed.remove(cap);
     }
 
-    pub async fn can_execute(&self, cap: &Capability) -> bool {
+    pub fn can_execute(&self, cap: &Capability) -> bool {
         match self.mode {
             CapabilityMode::AllowAll => true,
             CapabilityMode::DenyAll => false,
             CapabilityMode::Restrict => {
-                let allowed = self.allowed.read().await;
+                let allowed = self.allowed.read();
                 allowed.contains(cap)
             }
         }
@@ -62,28 +62,28 @@ impl CapabilityRegistry {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_allow_all_mode() {
+    #[test]
+    fn test_allow_all_mode() {
         let registry = CapabilityRegistry::new(CapabilityMode::AllowAll);
-        assert!(registry.can_execute(&Capability::ExecuteCommands).await);
+        assert!(registry.can_execute(&Capability::ExecuteCommands));
     }
 
-    #[tokio::test]
-    async fn test_deny_all_mode() {
+    #[test]
+    fn test_deny_all_mode() {
         let registry = CapabilityRegistry::new(CapabilityMode::DenyAll);
-        registry.grant(Capability::ReadFiles).await; // Should have no effect
-        assert!(!registry.can_execute(&Capability::ReadFiles).await);
+        registry.grant(Capability::ReadFiles); // Should have no effect
+        assert!(!registry.can_execute(&Capability::ReadFiles));
     }
 
-    #[tokio::test]
-    async fn test_restrict_mode() {
+    #[test]
+    fn test_restrict_mode() {
         let registry = CapabilityRegistry::new(CapabilityMode::Restrict);
-        assert!(!registry.can_execute(&Capability::WebFetch).await);
+        assert!(!registry.can_execute(&Capability::WebFetch));
         
-        registry.grant(Capability::WebFetch).await;
-        assert!(registry.can_execute(&Capability::WebFetch).await);
+        registry.grant(Capability::WebFetch);
+        assert!(registry.can_execute(&Capability::WebFetch));
         
-        registry.revoke(&Capability::WebFetch).await;
-        assert!(!registry.can_execute(&Capability::WebFetch).await);
+        registry.revoke(&Capability::WebFetch);
+        assert!(!registry.can_execute(&Capability::WebFetch));
     }
 }

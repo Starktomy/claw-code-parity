@@ -2,11 +2,13 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::json::{JsonError, JsonValue};
 use crate::usage::TokenUsage;
+use identity::CapabilityRegistry;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -43,11 +45,52 @@ pub struct ConversationMessage {
     pub usage: Option<TokenUsage>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Session {
     pub version: u32,
     pub messages: Vec<ConversationMessage>,
+    pub capabilities: Arc<CapabilityRegistry>,
 }
+
+impl Serialize for Session {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Session", 2)?;
+        state.serialize_field("version", &self.version)?;
+        state.serialize_field("messages", &self.messages)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Session {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct SessionData {
+            version: u32,
+            messages: Vec<ConversationMessage>,
+        }
+        let data = SessionData::deserialize(deserializer)?;
+        Ok(Self {
+            version: data.version,
+            messages: data.messages,
+            capabilities: Arc::new(CapabilityRegistry::new(identity::CapabilityMode::DenyAll)),
+        })
+    }
+}
+
+impl PartialEq for Session {
+    fn eq(&self, other: &Self) -> bool {
+        self.version == other.version && self.messages == other.messages
+    }
+}
+
+impl Eq for Session {}
 
 #[derive(Debug)]
 pub enum SessionError {
@@ -86,7 +129,13 @@ impl Session {
         Self {
             version: 1,
             messages: Vec::new(),
+            capabilities: Arc::new(CapabilityRegistry::new(identity::CapabilityMode::DenyAll)),
         }
+    }
+
+    pub fn with_capabilities(mut self, capabilities: Arc<CapabilityRegistry>) -> Self {
+        self.capabilities = capabilities;
+        self
     }
 
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), SessionError> {
@@ -135,7 +184,11 @@ impl Session {
             .iter()
             .map(ConversationMessage::from_json)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { version, messages })
+        Ok(Self {
+            version,
+            messages,
+            capabilities: Arc::new(CapabilityRegistry::new(identity::CapabilityMode::DenyAll)),
+        })
     }
 }
 
