@@ -36,9 +36,9 @@
 - [x] 实现基于权能 (Capability) 的工具调用控制。
 
 ### 第三阶段：消息生态接入 (Channels)
-- [ ] 创建 `crates/channels` (对应 `zeroclaw/src/channels`)。
-- [ ] 逐步搬迁 Slack, Discord 等核心 Adapter。
-- [ ] 实现 `ChannelManager` 统一管理所有监听器。
+- [x] 创建 `crates/channels` (对应 `zeroclaw/src/channels`)。
+- [x] 逐步搬迁 Slack, Discord 等核心 Adapter。
+- [x] 实现 `ChannelManager` 统一管理所有监听器。
 
 ### 第四阶段：高级 Agent 能力 (Skills, RAG & Memory)
 - [ ] 移植 `zeroclaw/src/rag` 和 `zeroclaw/src/memory` 到 `crates/runtime` 或独立的 `crates/rag`。
