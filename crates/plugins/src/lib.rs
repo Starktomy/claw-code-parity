@@ -1825,7 +1825,8 @@ fn run_lifecycle_commands(
             process
         } else {
             let mut process = Command::new("sh");
-            process.arg("-lc").arg(command);
+            let shell_args = if std::env::var("CI").is_ok() { "-c" } else { "-lc" };
+            process.arg(shell_args).arg(command);
             process
         };
         if let Some(root) = &metadata.root {

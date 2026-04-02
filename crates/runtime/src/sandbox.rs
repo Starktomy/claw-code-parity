@@ -233,7 +233,8 @@ pub fn build_linux_sandbox_command(
         args.push("--net".to_string());
     }
     args.push("sh".to_string());
-    args.push("-lc".to_string());
+    let shell_args = if std::env::var("CI").is_ok() { "-c" } else { "-lc" };
+    args.push(shell_args.to_string());
     args.push(command.to_string());
 
     let sandbox_home = cwd.join(".sandbox-home");

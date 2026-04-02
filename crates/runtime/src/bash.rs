@@ -198,7 +198,8 @@ fn prepare_command(
     }
 
     let mut prepared = Command::new("sh");
-    prepared.arg("-lc").arg(command).current_dir(cwd);
+    let shell_args = if std::env::var("CI").is_ok() { "-c" } else { "-lc" };
+    prepared.arg(shell_args).arg(command).current_dir(cwd);
     if sandbox_status.filesystem_active {
         prepared.env("HOME", cwd.join(".sandbox-home"));
         prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
@@ -225,7 +226,8 @@ fn prepare_tokio_command(
     }
 
     let mut prepared = TokioCommand::new("sh");
-    prepared.arg("-lc").arg(command).current_dir(cwd);
+    let shell_args = if std::env::var("CI").is_ok() { "-c" } else { "-lc" };
+    prepared.arg(shell_args).arg(command).current_dir(cwd);
     if sandbox_status.filesystem_active {
         prepared.env("HOME", cwd.join(".sandbox-home"));
         prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));

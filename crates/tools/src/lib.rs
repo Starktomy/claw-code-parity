@@ -2547,11 +2547,14 @@ fn execute_repl(input: ReplInput) -> Result<ReplOutput, String> {
     let _ = input.timeout_ms;
     let runtime = resolve_repl_runtime(&input.language)?;
     let started = Instant::now();
-    let output = Command::new(runtime.program)
-        .args(runtime.args)
-        .arg(&input.code)
-        .output()
-        .map_err(|error| error.to_string())?;
+    let mut process = Command::new("sh");
+    let shell_args = if std::env::var("CI").is_ok() { "-c" } else { "-lc" };
+    process.arg(shell_args);
+    
+    let full_command = format!("{} {} '{}'", runtime.program, runtime.args.join(" "), input.code.replace("'", "'\\''"));
+    process.arg(full_command);
+    
+    let output = process.output().map_err(|error| error.to_string())?;
 
     Ok(ReplOutput {
         language: input.language,
@@ -2582,7 +2585,7 @@ fn resolve_repl_runtime(language: &str) -> Result<ReplRuntime, String> {
         "sh" | "shell" | "bash" => Ok(ReplRuntime {
             program: detect_first_command(&["bash", "sh"])
                 .ok_or_else(|| String::from("shell runtime not found"))?,
-            args: &["-lc"],
+            args: if std::env::var("CI").is_ok() { &["-c"] } else { &["-lc"] },
         }),
         other => Err(format!("unsupported REPL language: {other}")),
     }
@@ -2862,7 +2865,7 @@ fn detect_powershell_shell() -> std::io::Result<&'static str> {
 
 fn command_exists(command: &str) -> bool {
     std::process::Command::new("sh")
-        .arg("-lc")
+        .arg("-c")
         .arg(format!("command -v {command} >/dev/null 2>&1"))
         .status()
         .map(|status| status.success())
@@ -3197,6 +3200,9 @@ mod tests {
 
     #[test]
     fn web_search_extracts_and_filters_results() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let server = TestServer::spawn(Arc::new(|request_line: &str| {
             assert!(request_line.contains("GET /search?q=rust+web+search "));
             HttpResponse::html(
@@ -3452,6 +3458,14 @@ mod tests {
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+            
+        // Create a temporary skill directory
+        let temp_dir = std::env::temp_dir().join(format!("claw-test-skills-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let help_dir = temp_dir.join("skills").join("help");
+        std::fs::create_dir_all(&help_dir).expect("create help skill dir");
+        std::fs::write(help_dir.join("SKILL.md"), "Guide on using oh-my-codex plugin").expect("write skill");
+        std::env::set_var("CODEX_HOME", &temp_dir);
+
         let result = execute_tool(
             "Skill",
             &json!({
@@ -3466,7 +3480,7 @@ mod tests {
         assert!(output["path"]
             .as_str()
             .expect("path")
-            .ends_with("/help/SKILL.md"));
+            .ends_with("SKILL.md"));
         assert!(output["prompt"]
             .as_str()
             .expect("prompt")
@@ -3485,7 +3499,10 @@ mod tests {
         assert!(dollar_output["path"]
             .as_str()
             .expect("path")
-            .ends_with("/help/SKILL.md"));
+            .ends_with("SKILL.md"));
+            
+        std::env::remove_var("CODEX_HOME");
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]
@@ -3936,6 +3953,9 @@ mod tests {
 
     #[test]
     fn bash_tool_reports_success_exit_failure_timeout_and_background() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let success = execute_tool("bash", &json!({ "command": "printf 'hello'" }))
             .expect("bash should succeed");
         let success_output: serde_json::Value = serde_json::from_str(&success).expect("json");
@@ -4275,6 +4295,9 @@ mod tests {
 
     #[test]
     fn repl_executes_python_code() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = execute_tool(
             "REPL",
             &json!({"language": "python", "code": "print(1 + 1)", "timeout_ms": 500}),

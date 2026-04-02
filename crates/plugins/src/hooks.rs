@@ -243,7 +243,8 @@ fn shell_command(command: &str) -> CommandWithStdin {
         CommandWithStdin::new(command_builder)
     } else {
         let mut command_builder = Command::new("sh");
-        command_builder.arg("-lc").arg(command);
+        let shell_args = if std::env::var("CI").is_ok() { "-c" } else { "-lc" };
+        command_builder.arg(shell_args).arg(command);
         CommandWithStdin::new(command_builder)
     };
 
@@ -314,7 +315,7 @@ mod tests {
         fs::create_dir_all(root.join("hooks")).expect("hooks dir");
         fs::write(
             root.join("hooks").join("pre.sh"),
-            format!("#!/bin/sh\nprintf '%s\\n' '{pre_message}'\n"),
+            format!("#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' '{pre_message}'\n"),
         )
         .expect("write pre hook");
         fs::write(

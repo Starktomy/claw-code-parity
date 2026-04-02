@@ -247,7 +247,8 @@ fn shell_command(command: &str) -> CommandWithStdin {
     #[cfg(not(windows))]
     let command_builder = {
         let mut command_builder = Command::new("sh");
-        command_builder.arg("-lc").arg(command);
+        let shell_args = if std::env::var("CI").is_ok() { "-c" } else { "-lc" };
+        command_builder.arg(shell_args).arg(command);
         CommandWithStdin::new(command_builder)
     };
 
