@@ -938,6 +938,7 @@ fn provider_label(kind: ProviderKind) -> &'static str {
         ProviderKind::Anthropic => "anthropic",
         ProviderKind::Xai => "xai",
         ProviderKind::OpenAi => "openai",
+        ProviderKind::ClawApi => "claw-api",
     }
 }
 
@@ -1762,7 +1763,7 @@ fn dump_manifests(output_format: CliOutputFormat) -> Result<(), Box<dyn std::err
 }
 
 fn print_bootstrap_plan(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
-    let phases = runtime::BootstrapPlan::claude_code_default()
+    let phases = runtime::BootstrapPlan::claw_default()
         .phases()
         .iter()
         .map(|phase| format!("{phase:?}"))
@@ -5631,7 +5632,7 @@ fn runtime_hook_config_from_plugin_hooks(hooks: PluginHooks) -> runtime::Runtime
     runtime::RuntimeHookConfig::new(
         hooks.pre_tool_use,
         hooks.post_tool_use,
-        hooks.post_tool_use_failure,
+        Vec::new(), // hooks.post_tool_use_failure removed in upstream
     )
 }
 

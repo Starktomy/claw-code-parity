@@ -1,10 +1,8 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt;
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use plugins::{PluginError, PluginManager, PluginSummary};
 use runtime::{
@@ -44,34 +42,12 @@ impl CommandRegistry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SlashCommandCategory {
-    Core,
-    Workspace,
-    Session,
-    Git,
-    Automation,
-}
-
-impl SlashCommandCategory {
-    const fn title(self) -> &'static str {
-        match self {
-            Self::Core => "Core flow",
-            Self::Workspace => "Workspace & memory",
-            Self::Session => "Sessions & output",
-            Self::Git => "Git & GitHub",
-            Self::Automation => "Automation & discovery",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlashCommandSpec {
     pub name: &'static str,
     pub aliases: &'static [&'static str],
     pub summary: &'static str,
     pub argument_hint: Option<&'static str>,
     pub resume_supported: bool,
-    pub category: SlashCommandCategory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +63,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Show available slash commands",
         argument_hint: None,
         resume_supported: true,
-        category: SlashCommandCategory::Core,
     },
     SlashCommandSpec {
         name: "status",
@@ -95,7 +70,13 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Show current session status",
         argument_hint: None,
         resume_supported: true,
-        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "sandbox",
+        aliases: &[],
+        summary: "Show sandbox isolation status",
+        argument_hint: None,
+        resume_supported: true,
     },
     SlashCommandSpec {
         name: "compact",
@@ -103,7 +84,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Compact local session history",
         argument_hint: None,
         resume_supported: true,
-        category: SlashCommandCategory::Core,
     },
     SlashCommandSpec {
         name: "model",
@@ -111,7 +91,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Show or switch the active model",
         argument_hint: Some("[model]"),
         resume_supported: false,
-        category: SlashCommandCategory::Core,
     },
     SlashCommandSpec {
         name: "permissions",
@@ -119,7 +98,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Show or switch the active permission mode",
         argument_hint: Some("[read-only|workspace-write|danger-full-access]"),
         resume_supported: false,
-        category: SlashCommandCategory::Core,
     },
     SlashCommandSpec {
         name: "clear",
@@ -127,7 +105,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Start a fresh local session",
         argument_hint: Some("[--confirm]"),
         resume_supported: true,
-        category: SlashCommandCategory::Session,
     },
     SlashCommandSpec {
         name: "cost",
@@ -135,7 +112,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Show cumulative token usage for this session",
         argument_hint: None,
         resume_supported: true,
-        category: SlashCommandCategory::Core,
     },
     SlashCommandSpec {
         name: "resume",
@@ -143,15 +119,13 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Load a saved session into the REPL",
         argument_hint: Some("<session-path>"),
         resume_supported: false,
-        category: SlashCommandCategory::Session,
     },
     SlashCommandSpec {
         name: "config",
         aliases: &[],
-        summary: "Inspect Claw config files or merged sections",
+        summary: "Inspect Claude config files or merged sections",
         argument_hint: Some("[env|hooks|model|plugins]"),
         resume_supported: true,
-        category: SlashCommandCategory::Workspace,
     },
     SlashCommandSpec {
         name: "mcp",
@@ -163,18 +137,16 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "memory",
         aliases: &[],
-        summary: "Inspect loaded Claw instruction memory files",
+        summary: "Inspect loaded Claude instruction memory files",
         argument_hint: None,
         resume_supported: true,
-        category: SlashCommandCategory::Workspace,
     },
     SlashCommandSpec {
         name: "init",
         aliases: &[],
-        summary: "Create a starter CLAW.md for this repo",
+        summary: "Create a starter CLAUDE.md for this repo",
         argument_hint: None,
         resume_supported: true,
-        category: SlashCommandCategory::Workspace,
     },
     SlashCommandSpec {
         name: "diff",
@@ -182,7 +154,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Show git diff for current workspace changes",
         argument_hint: None,
         resume_supported: true,
-        category: SlashCommandCategory::Workspace,
     },
     SlashCommandSpec {
         name: "version",
@@ -190,7 +161,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Show CLI version and build information",
         argument_hint: None,
         resume_supported: true,
-        category: SlashCommandCategory::Workspace,
     },
     SlashCommandSpec {
         name: "bughunter",
@@ -198,23 +168,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Inspect the codebase for likely bugs",
         argument_hint: Some("[scope]"),
         resume_supported: false,
-        category: SlashCommandCategory::Automation,
-    },
-    SlashCommandSpec {
-        name: "branch",
-        aliases: &[],
-        summary: "List, create, or switch git branches",
-        argument_hint: Some("[list|create <name>|switch <name>]"),
-        resume_supported: false,
-        category: SlashCommandCategory::Git,
-    },
-    SlashCommandSpec {
-        name: "worktree",
-        aliases: &[],
-        summary: "List, add, remove, or prune git worktrees",
-        argument_hint: Some("[list|add <path> [branch]|remove <path>|prune]"),
-        resume_supported: false,
-        category: SlashCommandCategory::Git,
     },
     SlashCommandSpec {
         name: "commit",
@@ -222,15 +175,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Generate a commit message and create a git commit",
         argument_hint: None,
         resume_supported: false,
-        category: SlashCommandCategory::Git,
-    },
-    SlashCommandSpec {
-        name: "commit-push-pr",
-        aliases: &[],
-        summary: "Commit workspace changes, push the branch, and open a PR",
-        argument_hint: Some("[context]"),
-        resume_supported: false,
-        category: SlashCommandCategory::Git,
     },
     SlashCommandSpec {
         name: "pr",
@@ -238,7 +182,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Draft or create a pull request from the conversation",
         argument_hint: Some("[context]"),
         resume_supported: false,
-        category: SlashCommandCategory::Git,
     },
     SlashCommandSpec {
         name: "issue",
@@ -246,7 +189,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Draft or create a GitHub issue from the conversation",
         argument_hint: Some("[context]"),
         resume_supported: false,
-        category: SlashCommandCategory::Git,
     },
     SlashCommandSpec {
         name: "ultraplan",
@@ -254,7 +196,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Run a deep planning prompt with multi-step reasoning",
         argument_hint: Some("[task]"),
         resume_supported: false,
-        category: SlashCommandCategory::Automation,
     },
     SlashCommandSpec {
         name: "teleport",
@@ -262,7 +203,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Jump to a file or symbol by searching the workspace",
         argument_hint: Some("<symbol-or-path>"),
         resume_supported: false,
-        category: SlashCommandCategory::Workspace,
     },
     SlashCommandSpec {
         name: "debug-tool-call",
@@ -270,7 +210,6 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Replay the last tool call with debug details",
         argument_hint: None,
         resume_supported: false,
-        category: SlashCommandCategory::Automation,
     },
     SlashCommandSpec {
         name: "export",
@@ -278,15 +217,13 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         summary: "Export the current conversation to a file",
         argument_hint: Some("[file]"),
         resume_supported: true,
-        category: SlashCommandCategory::Session,
     },
     SlashCommandSpec {
         name: "session",
         aliases: &[],
-        summary: "List or switch managed local sessions",
-        argument_hint: Some("[list|switch <session-id>]"),
+        summary: "List, switch, or fork managed local sessions",
+        argument_hint: Some("[list|switch <session-id>|fork [branch-name]]"),
         resume_supported: false,
-        category: SlashCommandCategory::Session,
     },
     SlashCommandSpec {
         name: "plugin",
@@ -296,15 +233,13 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
             "[list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]",
         ),
         resume_supported: false,
-        category: SlashCommandCategory::Automation,
     },
     SlashCommandSpec {
         name: "agents",
         aliases: &[],
         summary: "List configured agents",
-        argument_hint: None,
+        argument_hint: Some("[list|help]"),
         resume_supported: true,
-        category: SlashCommandCategory::Automation,
     },
     SlashCommandSpec {
         name: "skills",
@@ -316,10 +251,800 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "doctor",
         aliases: &[],
-        summary: "List available skills",
+        summary: "Diagnose setup issues and environment health",
         argument_hint: None,
         resume_supported: true,
-        category: SlashCommandCategory::Automation,
+    },
+    SlashCommandSpec {
+        name: "login",
+        aliases: &[],
+        summary: "Log in to the service",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "logout",
+        aliases: &[],
+        summary: "Log out of the current session",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "plan",
+        aliases: &[],
+        summary: "Toggle or inspect planning mode",
+        argument_hint: Some("[on|off]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "review",
+        aliases: &[],
+        summary: "Run a code review on current changes",
+        argument_hint: Some("[scope]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "tasks",
+        aliases: &[],
+        summary: "List and manage background tasks",
+        argument_hint: Some("[list|get <id>|stop <id>]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "theme",
+        aliases: &[],
+        summary: "Switch the terminal color theme",
+        argument_hint: Some("[theme-name]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "vim",
+        aliases: &[],
+        summary: "Toggle vim keybinding mode",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "voice",
+        aliases: &[],
+        summary: "Toggle voice input mode",
+        argument_hint: Some("[on|off]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "upgrade",
+        aliases: &[],
+        summary: "Check for and install CLI updates",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "usage",
+        aliases: &[],
+        summary: "Show detailed API usage statistics",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "stats",
+        aliases: &[],
+        summary: "Show workspace and session statistics",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "rename",
+        aliases: &[],
+        summary: "Rename the current session",
+        argument_hint: Some("<name>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "copy",
+        aliases: &[],
+        summary: "Copy conversation or output to clipboard",
+        argument_hint: Some("[last|all]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "share",
+        aliases: &[],
+        summary: "Share the current conversation",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "feedback",
+        aliases: &[],
+        summary: "Submit feedback about the current session",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "hooks",
+        aliases: &[],
+        summary: "List and manage lifecycle hooks",
+        argument_hint: Some("[list|run <hook>]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "files",
+        aliases: &[],
+        summary: "List files in the current context window",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "context",
+        aliases: &[],
+        summary: "Inspect or manage the conversation context",
+        argument_hint: Some("[show|clear]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "color",
+        aliases: &[],
+        summary: "Configure terminal color settings",
+        argument_hint: Some("[scheme]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "effort",
+        aliases: &[],
+        summary: "Set the effort level for responses",
+        argument_hint: Some("[low|medium|high]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "fast",
+        aliases: &[],
+        summary: "Toggle fast/concise response mode",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "exit",
+        aliases: &[],
+        summary: "Exit the REPL session",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "branch",
+        aliases: &[],
+        summary: "Create or switch git branches",
+        argument_hint: Some("[name]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "rewind",
+        aliases: &[],
+        summary: "Rewind the conversation to a previous state",
+        argument_hint: Some("[steps]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "summary",
+        aliases: &[],
+        summary: "Generate a summary of the conversation",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "desktop",
+        aliases: &[],
+        summary: "Open or manage the desktop app integration",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "ide",
+        aliases: &[],
+        summary: "Open or configure IDE integration",
+        argument_hint: Some("[vscode|cursor]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "tag",
+        aliases: &[],
+        summary: "Tag the current conversation point",
+        argument_hint: Some("[label]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "brief",
+        aliases: &[],
+        summary: "Toggle brief output mode",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "advisor",
+        aliases: &[],
+        summary: "Toggle advisor mode for guidance-only responses",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "stickers",
+        aliases: &[],
+        summary: "Browse and manage sticker packs",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "insights",
+        aliases: &[],
+        summary: "Show AI-generated insights about the session",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "thinkback",
+        aliases: &[],
+        summary: "Replay the thinking process of the last response",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "release-notes",
+        aliases: &[],
+        summary: "Generate release notes from recent changes",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "security-review",
+        aliases: &[],
+        summary: "Run a security review on the codebase",
+        argument_hint: Some("[scope]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "keybindings",
+        aliases: &[],
+        summary: "Show or configure keyboard shortcuts",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "privacy-settings",
+        aliases: &[],
+        summary: "View or modify privacy settings",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "output-style",
+        aliases: &[],
+        summary: "Switch output formatting style",
+        argument_hint: Some("[style]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "add-dir",
+        aliases: &[],
+        summary: "Add an additional directory to the context",
+        argument_hint: Some("<path>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "allowed-tools",
+        aliases: &[],
+        summary: "Show or modify the allowed tools list",
+        argument_hint: Some("[add|remove|list] [tool]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "api-key",
+        aliases: &[],
+        summary: "Show or set the Anthropic API key",
+        argument_hint: Some("[key]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "approve",
+        aliases: &["yes", "y"],
+        summary: "Approve a pending tool execution",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "deny",
+        aliases: &["no", "n"],
+        summary: "Deny a pending tool execution",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "undo",
+        aliases: &[],
+        summary: "Undo the last file write or edit",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "stop",
+        aliases: &[],
+        summary: "Stop the current generation",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "retry",
+        aliases: &[],
+        summary: "Retry the last failed message",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "paste",
+        aliases: &[],
+        summary: "Paste clipboard content as input",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "screenshot",
+        aliases: &[],
+        summary: "Take a screenshot and add to conversation",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "image",
+        aliases: &[],
+        summary: "Add an image file to the conversation",
+        argument_hint: Some("<path>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "terminal-setup",
+        aliases: &[],
+        summary: "Configure terminal integration settings",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "search",
+        aliases: &[],
+        summary: "Search files in the workspace",
+        argument_hint: Some("<query>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "listen",
+        aliases: &[],
+        summary: "Listen for voice input",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "speak",
+        aliases: &[],
+        summary: "Read the last response aloud",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "language",
+        aliases: &[],
+        summary: "Set the interface language",
+        argument_hint: Some("[language]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "profile",
+        aliases: &[],
+        summary: "Show or switch user profile",
+        argument_hint: Some("[name]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "max-tokens",
+        aliases: &[],
+        summary: "Show or set the max output tokens",
+        argument_hint: Some("[count]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "temperature",
+        aliases: &[],
+        summary: "Show or set the sampling temperature",
+        argument_hint: Some("[value]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "system-prompt",
+        aliases: &[],
+        summary: "Show the active system prompt",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "tool-details",
+        aliases: &[],
+        summary: "Show detailed info about a specific tool",
+        argument_hint: Some("<tool-name>"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "format",
+        aliases: &[],
+        summary: "Format the last response in a different style",
+        argument_hint: Some("[markdown|plain|json]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "pin",
+        aliases: &[],
+        summary: "Pin a message to persist across compaction",
+        argument_hint: Some("[message-index]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "unpin",
+        aliases: &[],
+        summary: "Unpin a previously pinned message",
+        argument_hint: Some("[message-index]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "bookmarks",
+        aliases: &[],
+        summary: "List or manage conversation bookmarks",
+        argument_hint: Some("[add|remove|list]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "workspace",
+        aliases: &["cwd"],
+        summary: "Show or change the working directory",
+        argument_hint: Some("[path]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "history",
+        aliases: &[],
+        summary: "Show conversation history summary",
+        argument_hint: Some("[count]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "tokens",
+        aliases: &[],
+        summary: "Show token count for the current conversation",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "cache",
+        aliases: &[],
+        summary: "Show prompt cache statistics",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "providers",
+        aliases: &[],
+        summary: "List available model providers",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "notifications",
+        aliases: &[],
+        summary: "Show or configure notification settings",
+        argument_hint: Some("[on|off|status]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "changelog",
+        aliases: &[],
+        summary: "Show recent changes to the codebase",
+        argument_hint: Some("[count]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "test",
+        aliases: &[],
+        summary: "Run tests for the current project",
+        argument_hint: Some("[filter]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "lint",
+        aliases: &[],
+        summary: "Run linting for the current project",
+        argument_hint: Some("[filter]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "build",
+        aliases: &[],
+        summary: "Build the current project",
+        argument_hint: Some("[target]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "run",
+        aliases: &[],
+        summary: "Run a command in the project context",
+        argument_hint: Some("<command>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "git",
+        aliases: &[],
+        summary: "Run a git command in the workspace",
+        argument_hint: Some("<subcommand>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "stash",
+        aliases: &[],
+        summary: "Stash or unstash workspace changes",
+        argument_hint: Some("[pop|list|apply]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "blame",
+        aliases: &[],
+        summary: "Show git blame for a file",
+        argument_hint: Some("<file> [line]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "log",
+        aliases: &[],
+        summary: "Show git log for the workspace",
+        argument_hint: Some("[count]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "cron",
+        aliases: &[],
+        summary: "Manage scheduled tasks",
+        argument_hint: Some("[list|add|remove]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "team",
+        aliases: &[],
+        summary: "Manage agent teams",
+        argument_hint: Some("[list|create|delete]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "benchmark",
+        aliases: &[],
+        summary: "Run performance benchmarks",
+        argument_hint: Some("[suite]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "migrate",
+        aliases: &[],
+        summary: "Run pending data migrations",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "reset",
+        aliases: &[],
+        summary: "Reset configuration to defaults",
+        argument_hint: Some("[section]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "telemetry",
+        aliases: &[],
+        summary: "Show or configure telemetry settings",
+        argument_hint: Some("[on|off|status]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "env",
+        aliases: &[],
+        summary: "Show environment variables visible to tools",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "project",
+        aliases: &[],
+        summary: "Show project detection info",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "templates",
+        aliases: &[],
+        summary: "List or apply prompt templates",
+        argument_hint: Some("[list|apply <name>]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "explain",
+        aliases: &[],
+        summary: "Explain a file or code snippet",
+        argument_hint: Some("<path> [line-range]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "refactor",
+        aliases: &[],
+        summary: "Suggest refactoring for a file or function",
+        argument_hint: Some("<path> [scope]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "docs",
+        aliases: &[],
+        summary: "Generate or show documentation",
+        argument_hint: Some("[path]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "fix",
+        aliases: &[],
+        summary: "Fix errors in a file or project",
+        argument_hint: Some("[path]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "perf",
+        aliases: &[],
+        summary: "Analyze performance of a function or file",
+        argument_hint: Some("<path>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "chat",
+        aliases: &[],
+        summary: "Switch to free-form chat mode",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "focus",
+        aliases: &[],
+        summary: "Focus context on specific files or directories",
+        argument_hint: Some("<path> [path...]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "unfocus",
+        aliases: &[],
+        summary: "Remove focus from files or directories",
+        argument_hint: Some("[path...]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "web",
+        aliases: &[],
+        summary: "Fetch and summarize a web page",
+        argument_hint: Some("<url>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "map",
+        aliases: &[],
+        summary: "Show a visual map of the codebase structure",
+        argument_hint: Some("[depth]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "symbols",
+        aliases: &[],
+        summary: "List symbols (functions, classes, etc.) in a file",
+        argument_hint: Some("<path>"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "references",
+        aliases: &[],
+        summary: "Find all references to a symbol",
+        argument_hint: Some("<symbol>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "definition",
+        aliases: &[],
+        summary: "Go to the definition of a symbol",
+        argument_hint: Some("<symbol>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "hover",
+        aliases: &[],
+        summary: "Show hover information for a symbol",
+        argument_hint: Some("<symbol>"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "diagnostics",
+        aliases: &[],
+        summary: "Show LSP diagnostics for a file",
+        argument_hint: Some("[path]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "autofix",
+        aliases: &[],
+        summary: "Auto-fix all fixable diagnostics",
+        argument_hint: Some("[path]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "multi",
+        aliases: &[],
+        summary: "Execute multiple slash commands in sequence",
+        argument_hint: Some("<commands>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "macro",
+        aliases: &[],
+        summary: "Record or replay command macros",
+        argument_hint: Some("[record|stop|play <name>]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "alias",
+        aliases: &[],
+        summary: "Create a command alias",
+        argument_hint: Some("<name> <command>"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "parallel",
+        aliases: &[],
+        summary: "Run commands in parallel subagents",
+        argument_hint: Some("<count> <prompt>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "agent",
+        aliases: &[],
+        summary: "Manage sub-agents and spawned sessions",
+        argument_hint: Some("[list|spawn|kill]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "subagent",
+        aliases: &[],
+        summary: "Control active subagent execution",
+        argument_hint: Some("[list|steer <target> <msg>|kill <id>]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "reasoning",
+        aliases: &[],
+        summary: "Toggle extended reasoning mode",
+        argument_hint: Some("[on|off|stream]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "budget",
+        aliases: &[],
+        summary: "Show or set token budget limits",
+        argument_hint: Some("[show|set <limit>]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "rate-limit",
+        aliases: &[],
+        summary: "Configure API rate limiting",
+        argument_hint: Some("[status|set <rpm>]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "metrics",
+        aliases: &[],
+        summary: "Show performance and usage metrics",
+        argument_hint: None,
+        resume_supported: true,
     },
 ];
 
@@ -327,23 +1052,12 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
 pub enum SlashCommand {
     Help,
     Status,
+    Sandbox,
     Compact,
-    Branch {
-        action: Option<String>,
-        target: Option<String>,
-    },
     Bughunter {
         scope: Option<String>,
     },
-    Worktree {
-        action: Option<String>,
-        path: Option<String>,
-        branch: Option<String>,
-    },
     Commit,
-    CommitPushPr {
-        context: Option<String>,
-    },
     Pr {
         context: Option<String>,
     },
@@ -480,92 +1194,528 @@ pub enum SlashCommand {
     Unknown(String),
 }
 
-impl SlashCommand {
-    #[must_use]
-    pub fn parse(input: &str) -> Option<Self> {
-        let trimmed = input.trim();
-        if !trimmed.starts_with('/') {
-            return None;
-        }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashCommandParseError {
+    message: String,
+}
 
-        let mut parts = trimmed.trim_start_matches('/').split_whitespace();
-        let command = parts.next().unwrap_or_default();
-        Some(match command {
-            "help" => Self::Help,
-            "status" => Self::Status,
-            "compact" => Self::Compact,
-            "branch" => Self::Branch {
-                action: parts.next().map(ToOwned::to_owned),
-                target: parts.next().map(ToOwned::to_owned),
-            },
-            "bughunter" => Self::Bughunter {
-                scope: remainder_after_command(trimmed, command),
-            },
-            "worktree" => Self::Worktree {
-                action: parts.next().map(ToOwned::to_owned),
-                path: parts.next().map(ToOwned::to_owned),
-                branch: parts.next().map(ToOwned::to_owned),
-            },
-            "commit" => Self::Commit,
-            "commit-push-pr" => Self::CommitPushPr {
-                context: remainder_after_command(trimmed, command),
-            },
-            "pr" => Self::Pr {
-                context: remainder_after_command(trimmed, command),
-            },
-            "issue" => Self::Issue {
-                context: remainder_after_command(trimmed, command),
-            },
-            "ultraplan" => Self::Ultraplan {
-                task: remainder_after_command(trimmed, command),
-            },
-            "teleport" => Self::Teleport {
-                target: remainder_after_command(trimmed, command),
-            },
-            "debug-tool-call" => Self::DebugToolCall,
-            "model" => Self::Model {
-                model: parts.next().map(ToOwned::to_owned),
-            },
-            "permissions" => Self::Permissions {
-                mode: parts.next().map(ToOwned::to_owned),
-            },
-            "clear" => Self::Clear {
-                confirm: parts.next() == Some("--confirm"),
-            },
-            "cost" => Self::Cost,
-            "resume" => Self::Resume {
-                session_path: parts.next().map(ToOwned::to_owned),
-            },
-            "config" => Self::Config {
-                section: parts.next().map(ToOwned::to_owned),
-            },
-            "memory" => Self::Memory,
-            "init" => Self::Init,
-            "diff" => Self::Diff,
-            "version" => Self::Version,
-            "export" => Self::Export {
-                path: parts.next().map(ToOwned::to_owned),
-            },
-            "session" => Self::Session {
-                action: parts.next().map(ToOwned::to_owned),
-                target: parts.next().map(ToOwned::to_owned),
-            },
-            "plugin" | "plugins" | "marketplace" => Self::Plugins {
-                action: parts.next().map(ToOwned::to_owned),
-                target: {
-                    let remainder = parts.collect::<Vec<_>>().join(" ");
-                    (!remainder.is_empty()).then_some(remainder)
-                },
-            },
-            "agents" => Self::Agents {
-                args: remainder_after_command(trimmed, command),
-            },
-            "skills" => Self::Skills {
-                args: remainder_after_command(trimmed, command),
-            },
-            other => Self::Unknown(other.to_string()),
-        })
+impl SlashCommandParseError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
     }
+}
+
+impl fmt::Display for SlashCommandParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SlashCommandParseError {}
+
+impl SlashCommand {
+    pub fn parse(input: &str) -> Result<Option<Self>, SlashCommandParseError> {
+        validate_slash_command_input(input)
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+pub fn validate_slash_command_input(
+    input: &str,
+) -> Result<Option<SlashCommand>, SlashCommandParseError> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('/') {
+        return Ok(None);
+    }
+
+    let mut parts = trimmed.trim_start_matches('/').split_whitespace();
+    let command = parts.next().unwrap_or_default();
+    if command.is_empty() {
+        return Err(SlashCommandParseError::new(
+            "Slash command name is missing. Use /help to list available slash commands.",
+        ));
+    }
+
+    let args = parts.collect::<Vec<_>>();
+    let remainder = remainder_after_command(trimmed, command);
+
+    Ok(Some(match command {
+        "help" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Help
+        }
+        "status" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Status
+        }
+        "sandbox" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Sandbox
+        }
+        "compact" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Compact
+        }
+        "bughunter" => SlashCommand::Bughunter { scope: remainder },
+        "commit" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Commit
+        }
+        "pr" => SlashCommand::Pr { context: remainder },
+        "issue" => SlashCommand::Issue { context: remainder },
+        "ultraplan" => SlashCommand::Ultraplan { task: remainder },
+        "teleport" => SlashCommand::Teleport {
+            target: Some(require_remainder(command, remainder, "<symbol-or-path>")?),
+        },
+        "debug-tool-call" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::DebugToolCall
+        }
+        "model" => SlashCommand::Model {
+            model: optional_single_arg(command, &args, "[model]")?,
+        },
+        "permissions" => SlashCommand::Permissions {
+            mode: parse_permissions_mode(&args)?,
+        },
+        "clear" => SlashCommand::Clear {
+            confirm: parse_clear_args(&args)?,
+        },
+        "cost" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Cost
+        }
+        "resume" => SlashCommand::Resume {
+            session_path: Some(require_remainder(command, remainder, "<session-path>")?),
+        },
+        "config" => SlashCommand::Config {
+            section: parse_config_section(&args)?,
+        },
+        "mcp" => parse_mcp_command(&args)?,
+        "memory" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Memory
+        }
+        "init" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Init
+        }
+        "diff" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Diff
+        }
+        "version" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Version
+        }
+        "export" => SlashCommand::Export { path: remainder },
+        "session" => parse_session_command(&args)?,
+        "plugin" | "plugins" | "marketplace" => parse_plugin_command(&args)?,
+        "agents" => SlashCommand::Agents {
+            args: parse_list_or_help_args(command, remainder)?,
+        },
+        "skills" | "skill" => SlashCommand::Skills {
+            args: parse_skills_args(remainder.as_deref())?,
+        },
+        "doctor" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Doctor
+        }
+        "login" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Login
+        }
+        "logout" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Logout
+        }
+        "vim" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Vim
+        }
+        "upgrade" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Upgrade
+        }
+        "stats" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Stats
+        }
+        "share" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Share
+        }
+        "feedback" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Feedback
+        }
+        "files" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Files
+        }
+        "fast" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Fast
+        }
+        "exit" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Exit
+        }
+        "summary" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Summary
+        }
+        "desktop" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Desktop
+        }
+        "brief" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Brief
+        }
+        "advisor" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Advisor
+        }
+        "stickers" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Stickers
+        }
+        "insights" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Insights
+        }
+        "thinkback" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Thinkback
+        }
+        "release-notes" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::ReleaseNotes
+        }
+        "security-review" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::SecurityReview
+        }
+        "keybindings" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Keybindings
+        }
+        "privacy-settings" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::PrivacySettings
+        }
+        "plan" => SlashCommand::Plan { mode: remainder },
+        "review" => SlashCommand::Review { scope: remainder },
+        "tasks" => SlashCommand::Tasks { args: remainder },
+        "theme" => SlashCommand::Theme { name: remainder },
+        "voice" => SlashCommand::Voice { mode: remainder },
+        "usage" => SlashCommand::Usage { scope: remainder },
+        "rename" => SlashCommand::Rename { name: remainder },
+        "copy" => SlashCommand::Copy { target: remainder },
+        "hooks" => SlashCommand::Hooks { args: remainder },
+        "context" => SlashCommand::Context { action: remainder },
+        "color" => SlashCommand::Color { scheme: remainder },
+        "effort" => SlashCommand::Effort { level: remainder },
+        "branch" => SlashCommand::Branch { name: remainder },
+        "rewind" => SlashCommand::Rewind { steps: remainder },
+        "ide" => SlashCommand::Ide { target: remainder },
+        "tag" => SlashCommand::Tag { label: remainder },
+        "output-style" => SlashCommand::OutputStyle { style: remainder },
+        "add-dir" => SlashCommand::AddDir { path: remainder },
+        "history" => SlashCommand::History {
+            count: optional_single_arg(command, &args, "[count]")?,
+        },
+        other => SlashCommand::Unknown(other.to_string()),
+    }))
+}
+fn validate_no_args(command: &str, args: &[&str]) -> Result<(), SlashCommandParseError> {
+    if args.is_empty() {
+        return Ok(());
+    }
+
+    Err(command_error(
+        &format!("Unexpected arguments for /{command}."),
+        command,
+        &format!("/{command}"),
+    ))
+}
+
+fn optional_single_arg(
+    command: &str,
+    args: &[&str],
+    argument_hint: &str,
+) -> Result<Option<String>, SlashCommandParseError> {
+    match args {
+        [] => Ok(None),
+        [value] => Ok(Some((*value).to_string())),
+        _ => Err(usage_error(command, argument_hint)),
+    }
+}
+
+fn require_remainder(
+    command: &str,
+    remainder: Option<String>,
+    argument_hint: &str,
+) -> Result<String, SlashCommandParseError> {
+    remainder.ok_or_else(|| usage_error(command, argument_hint))
+}
+
+fn parse_permissions_mode(args: &[&str]) -> Result<Option<String>, SlashCommandParseError> {
+    let mode = optional_single_arg(
+        "permissions",
+        args,
+        "[read-only|workspace-write|danger-full-access]",
+    )?;
+    if let Some(mode) = mode {
+        if matches!(
+            mode.as_str(),
+            "read-only" | "workspace-write" | "danger-full-access"
+        ) {
+            return Ok(Some(mode));
+        }
+        return Err(command_error(
+            &format!(
+                "Unsupported /permissions mode '{mode}'. Use read-only, workspace-write, or danger-full-access."
+            ),
+            "permissions",
+            "/permissions [read-only|workspace-write|danger-full-access]",
+        ));
+    }
+
+    Ok(None)
+}
+
+fn parse_clear_args(args: &[&str]) -> Result<bool, SlashCommandParseError> {
+    match args {
+        [] => Ok(false),
+        ["--confirm"] => Ok(true),
+        [unexpected] => Err(command_error(
+            &format!("Unsupported /clear argument '{unexpected}'. Use /clear or /clear --confirm."),
+            "clear",
+            "/clear [--confirm]",
+        )),
+        _ => Err(usage_error("clear", "[--confirm]")),
+    }
+}
+
+fn parse_config_section(args: &[&str]) -> Result<Option<String>, SlashCommandParseError> {
+    let section = optional_single_arg("config", args, "[env|hooks|model|plugins]")?;
+    if let Some(section) = section {
+        if matches!(section.as_str(), "env" | "hooks" | "model" | "plugins") {
+            return Ok(Some(section));
+        }
+        return Err(command_error(
+            &format!("Unsupported /config section '{section}'. Use env, hooks, model, or plugins."),
+            "config",
+            "/config [env|hooks|model|plugins]",
+        ));
+    }
+
+    Ok(None)
+}
+
+fn parse_session_command(args: &[&str]) -> Result<SlashCommand, SlashCommandParseError> {
+    match args {
+        [] => Ok(SlashCommand::Session {
+            action: None,
+            target: None,
+        }),
+        ["list"] => Ok(SlashCommand::Session {
+            action: Some("list".to_string()),
+            target: None,
+        }),
+        ["list", ..] => Err(usage_error("session", "[list|switch <session-id>|fork [branch-name]]")),
+        ["switch"] => Err(usage_error("session switch", "<session-id>")),
+        ["switch", target] => Ok(SlashCommand::Session {
+            action: Some("switch".to_string()),
+            target: Some((*target).to_string()),
+        }),
+        ["switch", ..] => Err(command_error(
+            "Unexpected arguments for /session switch.",
+            "session",
+            "/session switch <session-id>",
+        )),
+        ["fork"] => Ok(SlashCommand::Session {
+            action: Some("fork".to_string()),
+            target: None,
+        }),
+        ["fork", target] => Ok(SlashCommand::Session {
+            action: Some("fork".to_string()),
+            target: Some((*target).to_string()),
+        }),
+        ["fork", ..] => Err(command_error(
+            "Unexpected arguments for /session fork.",
+            "session",
+            "/session fork [branch-name]",
+        )),
+        [action, ..] => Err(command_error(
+            &format!(
+                "Unknown /session action '{action}'. Use list, switch <session-id>, or fork [branch-name]."
+            ),
+            "session",
+            "/session [list|switch <session-id>|fork [branch-name]]",
+        )),
+    }
+}
+
+fn parse_mcp_command(args: &[&str]) -> Result<SlashCommand, SlashCommandParseError> {
+    match args {
+        [] => Ok(SlashCommand::Mcp {
+            action: None,
+            target: None,
+        }),
+        ["list"] => Ok(SlashCommand::Mcp {
+            action: Some("list".to_string()),
+            target: None,
+        }),
+        ["list", ..] => Err(usage_error("mcp list", "")),
+        ["show"] => Err(usage_error("mcp show", "<server>")),
+        ["show", target] => Ok(SlashCommand::Mcp {
+            action: Some("show".to_string()),
+            target: Some((*target).to_string()),
+        }),
+        ["show", ..] => Err(command_error(
+            "Unexpected arguments for /mcp show.",
+            "mcp",
+            "/mcp show <server>",
+        )),
+        ["help" | "-h" | "--help"] => Ok(SlashCommand::Mcp {
+            action: Some("help".to_string()),
+            target: None,
+        }),
+        [action, ..] => Err(command_error(
+            &format!("Unknown /mcp action '{action}'. Use list, show <server>, or help."),
+            "mcp",
+            "/mcp [list|show <server>|help]",
+        )),
+    }
+}
+
+fn parse_plugin_command(args: &[&str]) -> Result<SlashCommand, SlashCommandParseError> {
+    match args {
+        [] => Ok(SlashCommand::Plugins {
+            action: None,
+            target: None,
+        }),
+        ["list"] => Ok(SlashCommand::Plugins {
+            action: Some("list".to_string()),
+            target: None,
+        }),
+        ["list", ..] => Err(usage_error("plugin list", "")),
+        ["install"] => Err(usage_error("plugin install", "<path>")),
+        ["install", target @ ..] => Ok(SlashCommand::Plugins {
+            action: Some("install".to_string()),
+            target: Some(target.join(" ")),
+        }),
+        ["enable"] => Err(usage_error("plugin enable", "<name>")),
+        ["enable", target] => Ok(SlashCommand::Plugins {
+            action: Some("enable".to_string()),
+            target: Some((*target).to_string()),
+        }),
+        ["enable", ..] => Err(command_error(
+            "Unexpected arguments for /plugin enable.",
+            "plugin",
+            "/plugin enable <name>",
+        )),
+        ["disable"] => Err(usage_error("plugin disable", "<name>")),
+        ["disable", target] => Ok(SlashCommand::Plugins {
+            action: Some("disable".to_string()),
+            target: Some((*target).to_string()),
+        }),
+        ["disable", ..] => Err(command_error(
+            "Unexpected arguments for /plugin disable.",
+            "plugin",
+            "/plugin disable <name>",
+        )),
+        ["uninstall"] => Err(usage_error("plugin uninstall", "<id>")),
+        ["uninstall", target] => Ok(SlashCommand::Plugins {
+            action: Some("uninstall".to_string()),
+            target: Some((*target).to_string()),
+        }),
+        ["uninstall", ..] => Err(command_error(
+            "Unexpected arguments for /plugin uninstall.",
+            "plugin",
+            "/plugin uninstall <id>",
+        )),
+        ["update"] => Err(usage_error("plugin update", "<id>")),
+        ["update", target] => Ok(SlashCommand::Plugins {
+            action: Some("update".to_string()),
+            target: Some((*target).to_string()),
+        }),
+        ["update", ..] => Err(command_error(
+            "Unexpected arguments for /plugin update.",
+            "plugin",
+            "/plugin update <id>",
+        )),
+        [action, ..] => Err(command_error(
+            &format!(
+                "Unknown /plugin action '{action}'. Use list, install <path>, enable <name>, disable <name>, uninstall <id>, or update <id>."
+            ),
+            "plugin",
+            "/plugin [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]",
+        )),
+    }
+}
+
+fn parse_list_or_help_args(
+    command: &str,
+    args: Option<String>,
+) -> Result<Option<String>, SlashCommandParseError> {
+    match normalize_optional_args(args.as_deref()) {
+        None | Some("list" | "help" | "-h" | "--help") => Ok(args),
+        Some(unexpected) => Err(command_error(
+            &format!(
+                "Unexpected arguments for /{command}: {unexpected}. Use /{command}, /{command} list, or /{command} help."
+            ),
+            command,
+            &format!("/{command} [list|help]"),
+        )),
+    }
+}
+
+fn parse_skills_args(args: Option<&str>) -> Result<Option<String>, SlashCommandParseError> {
+    let Some(args) = normalize_optional_args(args) else {
+        return Ok(None);
+    };
+
+    if matches!(args, "list" | "help" | "-h" | "--help") {
+        return Ok(Some(args.to_string()));
+    }
+
+    if args == "install" {
+        return Err(command_error(
+            "Usage: /skills install <path>",
+            "skills",
+            "/skills install <path>",
+        ));
+    }
+
+    if let Some(target) = args.strip_prefix("install").map(str::trim) {
+        if !target.is_empty() {
+            return Ok(Some(format!("install {target}")));
+        }
+    }
+
+    Ok(Some(args.to_string()))
+}
+
+fn usage_error(command: &str, argument_hint: &str) -> SlashCommandParseError {
+    let usage = format!("/{command} {argument_hint}");
+    let usage = usage.trim_end().to_string();
+    command_error(
+        &format!("Usage: {usage}"),
+        command_root_name(command),
+        &usage,
+    )
+}
+
+fn command_error(message: &str, command: &str, usage: &str) -> SlashCommandParseError {
+    let detail = render_slash_command_help_detail(command)
+        .map(|detail| format!("\n\n{detail}"))
+        .unwrap_or_default();
+    SlashCommandParseError::new(format!("{message}\n  Usage            {usage}{detail}"))
 }
 
 fn remainder_after_command(input: &str, command: &str) -> Option<String> {
@@ -575,6 +1725,56 @@ fn remainder_after_command(input: &str, command: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn find_slash_command_spec(name: &str) -> Option<&'static SlashCommandSpec> {
+    slash_command_specs().iter().find(|spec| {
+        spec.name.eq_ignore_ascii_case(name)
+            || spec
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(name))
+    })
+}
+
+fn command_root_name(command: &str) -> &str {
+    command.split_whitespace().next().unwrap_or(command)
+}
+
+fn slash_command_usage(spec: &SlashCommandSpec) -> String {
+    match spec.argument_hint {
+        Some(argument_hint) => format!("/{} {argument_hint}", spec.name),
+        None => format!("/{}", spec.name),
+    }
+}
+
+fn slash_command_detail_lines(spec: &SlashCommandSpec) -> Vec<String> {
+    let mut lines = vec![format!("/{}", spec.name)];
+    lines.push(format!("  Summary          {}", spec.summary));
+    lines.push(format!("  Usage            {}", slash_command_usage(spec)));
+    lines.push(format!(
+        "  Category         {}",
+        slash_command_category(spec.name)
+    ));
+    if !spec.aliases.is_empty() {
+        lines.push(format!(
+            "  Aliases          {}",
+            spec.aliases
+                .iter()
+                .map(|alias| format!("/{alias}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if spec.resume_supported {
+        lines.push("  Resume           Supported with --resume SESSION.jsonl".to_string());
+    }
+    lines
+}
+
+#[must_use]
+pub fn render_slash_command_help_detail(name: &str) -> Option<String> {
+    find_slash_command_spec(name).map(|spec| slash_command_detail_lines(spec).join("\n"))
 }
 
 #[must_use]
@@ -590,35 +1790,36 @@ pub fn resume_supported_slash_commands() -> Vec<&'static SlashCommandSpec> {
         .collect()
 }
 
-#[must_use]
-pub fn render_slash_command_help() -> String {
-    let mut lines = vec![
-        "Slash commands".to_string(),
-        "  Tab completes commands inside the REPL.".to_string(),
-        "  [resume] = also available via claw --resume SESSION.json".to_string(),
-    ];
-
-    for category in [
-        SlashCommandCategory::Core,
-        SlashCommandCategory::Workspace,
-        SlashCommandCategory::Session,
-        SlashCommandCategory::Git,
-        SlashCommandCategory::Automation,
-    ] {
-        lines.push(String::new());
-        lines.push(category.title().to_string());
-        lines.extend(
-            slash_command_specs()
-                .iter()
-                .filter(|spec| spec.category == category)
-                .map(render_slash_command_entry),
-        );
+fn slash_command_category(name: &str) -> &'static str {
+    match name {
+        "help" | "status" | "cost" | "resume" | "session" | "version" | "login" | "logout"
+        | "usage" | "stats" | "rename" | "clear" | "compact" | "history" | "tokens" | "cache"
+        | "exit" | "summary" | "tag" | "thinkback" | "copy" | "share" | "feedback" | "rewind"
+        | "pin" | "unpin" | "bookmarks" | "context" | "files" | "focus" | "unfocus" | "retry"
+        | "stop" | "undo" => "Session",
+        "diff" | "commit" | "pr" | "issue" | "branch" | "blame" | "log" | "git" | "stash"
+        | "init" | "export" | "plan" | "review" | "security-review" | "bughunter" | "ultraplan"
+        | "teleport" | "refactor" | "fix" | "autofix" | "explain" | "docs" | "perf" | "search"
+        | "references" | "definition" | "hover" | "symbols" | "map" | "web" | "image"
+        | "screenshot" | "paste" | "listen" | "speak" | "test" | "lint" | "build" | "run"
+        | "format" | "parallel" | "multi" | "macro" | "alias" | "templates" | "migrate"
+        | "benchmark" | "cron" | "agent" | "subagent" | "agents" | "skills" | "team" | "plugin"
+        | "mcp" | "hooks" | "tasks" | "advisor" | "insights" | "release-notes" | "chat"
+        | "approve" | "deny" | "allowed-tools" | "add-dir" => "Tools",
+        "model" | "permissions" | "config" | "memory" | "theme" | "vim" | "voice" | "color"
+        | "effort" | "fast" | "brief" | "output-style" | "keybindings" | "privacy-settings"
+        | "stickers" | "language" | "profile" | "max-tokens" | "temperature" | "system-prompt"
+        | "api-key" | "terminal-setup" | "notifications" | "telemetry" | "providers" | "env"
+        | "project" | "reasoning" | "budget" | "rate-limit" | "workspace" | "reset" | "ide"
+        | "desktop" | "upgrade" => "Config",
+        "debug-tool-call" | "doctor" | "sandbox" | "diagnostics" | "tool-details" | "changelog"
+        | "metrics" => "Debug",
+        _ => "Tools",
     }
-
-    lines.join("\n")
 }
 
-fn render_slash_command_entry(spec: &SlashCommandSpec) -> String {
+fn format_slash_command_help_line(spec: &SlashCommandSpec) -> String {
+    let name = slash_command_usage(spec);
     let alias_suffix = if spec.aliases.is_empty() {
         String::new()
     } else {
@@ -636,18 +1837,7 @@ fn render_slash_command_entry(spec: &SlashCommandSpec) -> String {
     } else {
         ""
     };
-    format!(
-        "  {name:<46} {}{alias_suffix}{resume}",
-        spec.summary,
-        name = render_slash_command_name(spec),
-    )
-}
-
-fn render_slash_command_name(spec: &SlashCommandSpec) -> String {
-    match spec.argument_hint {
-        Some(argument_hint) => format!("/{} {}", spec.name, argument_hint),
-        None => format!("/{}", spec.name),
-    }
+    format!("  {name:<66} {}{alias_suffix}{resume}", spec.summary)
 }
 
 fn levenshtein_distance(left: &str, right: &str) -> usize {
@@ -668,12 +1858,12 @@ fn levenshtein_distance(left: &str, right: &str) -> usize {
     for (left_index, left_char) in left.chars().enumerate() {
         current[0] = left_index + 1;
         for (right_index, right_char) in right_chars.iter().enumerate() {
-            let cost = usize::from(left_char != *right_char);
-            current[right_index + 1] = (previous[right_index + 1] + 1)
-                .min(current[right_index] + 1)
-                .min(previous[right_index] + cost);
+            let substitution_cost = usize::from(left_char != *right_char);
+            current[right_index + 1] = (current[right_index] + 1)
+                .min(previous[right_index + 1] + 1)
+                .min(previous[right_index] + substitution_cost);
         }
-        std::mem::swap(&mut previous, &mut current);
+        previous.clone_from(&current);
     }
 
     previous[right_chars.len()]
@@ -681,42 +1871,86 @@ fn levenshtein_distance(left: &str, right: &str) -> usize {
 
 #[must_use]
 pub fn suggest_slash_commands(input: &str, limit: usize) -> Vec<String> {
-    let normalized = input.trim().trim_start_matches('/').to_ascii_lowercase();
-    if normalized.is_empty() || limit == 0 {
+    let query = input.trim().trim_start_matches('/').to_ascii_lowercase();
+    if query.is_empty() || limit == 0 {
         return Vec::new();
     }
 
-    let mut ranked = slash_command_specs()
+    let mut suggestions = slash_command_specs()
         .iter()
         .filter_map(|spec| {
-            let score = std::iter::once(spec.name)
+            let best = std::iter::once(spec.name)
                 .chain(spec.aliases.iter().copied())
                 .map(str::to_ascii_lowercase)
-                .filter_map(|alias| {
-                    if alias == normalized {
-                        Some((0_usize, alias.len()))
-                    } else if alias.starts_with(&normalized) {
-                        Some((1, alias.len()))
-                    } else if alias.contains(&normalized) {
-                        Some((2, alias.len()))
-                    } else {
-                        let distance = levenshtein_distance(&alias, &normalized);
-                        (distance <= 2).then_some((3 + distance, alias.len()))
-                    }
+                .map(|candidate| {
+                    let prefix_rank =
+                        if candidate.starts_with(&query) || query.starts_with(&candidate) {
+                            0
+                        } else if candidate.contains(&query) || query.contains(&candidate) {
+                            1
+                        } else {
+                            2
+                        };
+                    let distance = levenshtein_distance(&candidate, &query);
+                    (prefix_rank, distance)
                 })
                 .min();
 
-            score.map(|(bucket, len)| (bucket, len, render_slash_command_name(spec)))
+            best.and_then(|(prefix_rank, distance)| {
+                if prefix_rank <= 1 || distance <= 2 {
+                    Some((prefix_rank, distance, spec.name.len(), spec.name))
+                } else {
+                    None
+                }
+            })
         })
         .collect::<Vec<_>>();
 
-    ranked.sort_by(|left, right| left.cmp(right));
-    ranked.dedup_by(|left, right| left.2 == right.2);
-    ranked
+    suggestions.sort_unstable();
+    suggestions
         .into_iter()
+        .map(|(_, _, _, name)| format!("/{name}"))
         .take(limit)
-        .map(|(_, _, display)| display)
         .collect()
+}
+
+#[must_use]
+pub fn render_slash_command_help() -> String {
+    let mut lines = vec![
+        "Slash commands".to_string(),
+        "  Start here        /status, /diff, /agents, /skills, /commit".to_string(),
+        "  [resume]          also works with --resume SESSION.jsonl".to_string(),
+        String::new(),
+    ];
+
+    let categories = ["Session", "Tools", "Config", "Debug"];
+
+    for category in categories {
+        lines.push(category.to_string());
+        for spec in slash_command_specs()
+            .iter()
+            .filter(|spec| slash_command_category(spec.name) == category)
+        {
+            lines.push(format_slash_command_help_line(spec));
+        }
+        lines.push(String::new());
+    }
+
+    lines.push("Keyboard shortcuts".to_string());
+    lines.push("  Up/Down              Navigate prompt history".to_string());
+    lines.push("  Tab                  Complete commands, modes, and recent sessions".to_string());
+    lines.push("  Ctrl-C               Clear input (or exit on empty prompt)".to_string());
+    lines.push("  Shift+Enter/Ctrl+J   Insert a newline".to_string());
+
+    lines
+        .into_iter()
+        .rev()
+        .skip_while(String::is_empty)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -735,11 +1969,12 @@ pub struct PluginsCommandResult {
 enum DefinitionSource {
     ProjectClaw,
     ProjectCodex,
-    ProjectClaw,
+    ProjectClaude,
+    UserClawConfigHome,
     UserCodexHome,
     UserClaw,
     UserCodex,
-    UserClaw,
+    UserClaude,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -752,11 +1987,9 @@ enum DefinitionScope {
 impl DefinitionScope {
     fn label(self) -> &'static str {
         match self {
-            Self::ProjectCodex => "Project (.codex)",
-            Self::ProjectClaw => "Project (.claw)",
-            Self::UserCodexHome => "User ($CODEX_HOME)",
-            Self::UserCodex => "User (~/.codex)",
-            Self::UserClaw => "User (~/.claw)",
+            Self::Project => "Project roots",
+            Self::UserConfigHome => "User config roots",
+            Self::UserHome => "User home roots",
         }
     }
 }
@@ -1034,390 +2267,245 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommitPushPrRequest {
-    pub commit_message: Option<String>,
-    pub pr_title: String,
-    pub pr_body: String,
-    pub branch_name_hint: String,
-}
+pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::io::Result<Value> {
+    if let Some(args) = normalize_optional_args(args) {
+        if let Some(help_path) = help_path_from_args(args) {
+            return Ok(match help_path.as_slice() {
+                [] => render_skills_usage_json(None),
+                ["install", ..] => render_skills_usage_json(Some("install")),
+                _ => render_skills_usage_json(Some(&help_path.join(" "))),
+            });
+        }
+    }
 
-pub fn handle_branch_slash_command(
-    action: Option<&str>,
-    target: Option<&str>,
-    cwd: &Path,
-) -> io::Result<String> {
-    match normalize_optional_args(action) {
+    match normalize_optional_args(args) {
         None | Some("list") => {
-            let branches = git_stdout(cwd, &["branch", "--list", "--verbose"])?;
-            let trimmed = branches.trim();
-            Ok(if trimmed.is_empty() {
-                "Branch\n  Result           no branches found".to_string()
-            } else {
-                format!("Branch\n  Result           listed\n\n{}", trimmed)
-            })
+            let roots = discover_skill_roots(cwd);
+            let skills = load_skills_from_roots(&roots)?;
+            Ok(render_skills_report_json(&skills))
         }
-        Some("create") => {
-            let Some(target) = target.filter(|value| !value.trim().is_empty()) else {
-                return Ok("Usage: /branch create <name>".to_string());
-            };
-            git_status_ok(cwd, &["switch", "-c", target])?;
-            Ok(format!(
-                "Branch\n  Result           created and switched\n  Branch           {target}"
-            ))
+        Some("install") => Ok(render_skills_usage_json(Some("install"))),
+        Some(args) if args.starts_with("install ") => {
+            let target = args["install ".len()..].trim();
+            if target.is_empty() {
+                return Ok(render_skills_usage_json(Some("install")));
+            }
+            let install = install_skill(target, cwd)?;
+            Ok(render_skill_install_report_json(&install))
         }
-        Some("switch") => {
-            let Some(target) = target.filter(|value| !value.trim().is_empty()) else {
-                return Ok("Usage: /branch switch <name>".to_string());
-            };
-            git_status_ok(cwd, &["switch", target])?;
-            Ok(format!(
-                "Branch\n  Result           switched\n  Branch           {target}"
-            ))
-        }
-        Some(other) => Ok(format!(
-            "Unknown /branch action '{other}'. Use /branch list, /branch create <name>, or /branch switch <name>."
-        )),
+        Some(args) if is_help_arg(args) => Ok(render_skills_usage_json(None)),
+        Some(args) => Ok(render_skills_usage_json(Some(args))),
     }
 }
 
-pub fn handle_worktree_slash_command(
-    action: Option<&str>,
-    path: Option<&str>,
-    branch: Option<&str>,
-    cwd: &Path,
-) -> io::Result<String> {
-    match normalize_optional_args(action) {
-        None | Some("list") => {
-            let worktrees = git_stdout(cwd, &["worktree", "list"])?;
-            let trimmed = worktrees.trim();
-            Ok(if trimmed.is_empty() {
-                "Worktree\n  Result           no worktrees found".to_string()
-            } else {
-                format!("Worktree\n  Result           listed\n\n{}", trimmed)
-            })
+#[must_use]
+pub fn classify_skills_slash_command(args: Option<&str>) -> SkillSlashDispatch {
+    match normalize_optional_args(args) {
+        None | Some("list" | "help" | "-h" | "--help") => SkillSlashDispatch::Local,
+        Some(args) if args == "install" || args.starts_with("install ") => {
+            SkillSlashDispatch::Local
         }
-        Some("add") => {
-            let Some(path) = path.filter(|value| !value.trim().is_empty()) else {
-                return Ok("Usage: /worktree add <path> [branch]".to_string());
-            };
-            if let Some(branch) = branch.filter(|value| !value.trim().is_empty()) {
-                if branch_exists(cwd, branch) {
-                    git_status_ok(cwd, &["worktree", "add", path, branch])?;
-                } else {
-                    git_status_ok(cwd, &["worktree", "add", path, "-b", branch])?;
+        Some(args) => SkillSlashDispatch::Invoke(format!("${}", args.trim_start_matches('/'))),
+    }
+}
+
+/// Resolve a skill invocation by validating the skill exists on disk before
+/// returning the dispatch.  When the skill is not found, returns `Err` with a
+/// human-readable message that lists nearby skill names.
+pub fn resolve_skill_invocation(
+    cwd: &Path,
+    args: Option<&str>,
+) -> Result<SkillSlashDispatch, String> {
+    let dispatch = classify_skills_slash_command(args);
+    if let SkillSlashDispatch::Invoke(ref prompt) = dispatch {
+        // Extract the skill name from the "$skill [args]" prompt.
+        let skill_token = prompt
+            .trim_start_matches('$')
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        if !skill_token.is_empty() {
+            if let Err(error) = resolve_skill_path(cwd, skill_token) {
+                let mut message = format!("Unknown skill: {skill_token} ({error})");
+                let roots = discover_skill_roots(cwd);
+                if let Ok(available) = load_skills_from_roots(&roots) {
+                    let names: Vec<String> = available
+                        .iter()
+                        .filter(|s| s.shadowed_by.is_none())
+                        .map(|s| s.name.clone())
+                        .collect();
+                    if !names.is_empty() {
+                        message.push_str(&format!("\n  Available skills: {}", names.join(", ")));
+                    }
                 }
-                Ok(format!(
-                    "Worktree\n  Result           added\n  Path             {path}\n  Branch           {branch}"
-                ))
-            } else {
-                git_status_ok(cwd, &["worktree", "add", path])?;
-                Ok(format!(
-                    "Worktree\n  Result           added\n  Path             {path}"
-                ))
+                message.push_str("\n  Usage: /skills [list|install <path>|help|<skill> [args]]");
+                return Err(message);
             }
         }
-        Some("remove") => {
-            let Some(path) = path.filter(|value| !value.trim().is_empty()) else {
-                return Ok("Usage: /worktree remove <path>".to_string());
-            };
-            git_status_ok(cwd, &["worktree", "remove", path])?;
-            Ok(format!(
-                "Worktree\n  Result           removed\n  Path             {path}"
-            ))
-        }
-        Some("prune") => {
-            git_status_ok(cwd, &["worktree", "prune"])?;
-            Ok("Worktree\n  Result           pruned".to_string())
-        }
-        Some(other) => Ok(format!(
-            "Unknown /worktree action '{other}'. Use /worktree list, /worktree add <path> [branch], /worktree remove <path>, or /worktree prune."
-        )),
     }
+    Ok(dispatch)
 }
 
-pub fn handle_commit_slash_command(message: &str, cwd: &Path) -> io::Result<String> {
-    let status = git_stdout(cwd, &["status", "--short"])?;
-    if status.trim().is_empty() {
-        return Ok(
-            "Commit\n  Result           skipped\n  Reason           no workspace changes"
-                .to_string(),
-        );
+pub fn resolve_skill_path(cwd: &Path, skill: &str) -> std::io::Result<PathBuf> {
+    let requested = skill.trim().trim_start_matches('/').trim_start_matches('$');
+    if requested.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "skill must not be empty",
+        ));
     }
 
-    let message = message.trim();
-    if message.is_empty() {
-        return Err(io::Error::other("generated commit message was empty"));
+    let roots = discover_skill_roots(cwd);
+    for root in &roots {
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(&root.path)? {
+            let entry = entry?;
+            match root.origin {
+                SkillOrigin::SkillsDir => {
+                    if !entry.path().is_dir() {
+                        continue;
+                    }
+                    let skill_path = entry.path().join("SKILL.md");
+                    if !skill_path.is_file() {
+                        continue;
+                    }
+                    let contents = fs::read_to_string(&skill_path)?;
+                    let (name, _) = parse_skill_frontmatter(&contents);
+                    entries.push((
+                        name.unwrap_or_else(|| entry.file_name().to_string_lossy().to_string()),
+                        skill_path,
+                    ));
+                }
+                SkillOrigin::LegacyCommandsDir => {
+                    let path = entry.path();
+                    let markdown_path = if path.is_dir() {
+                        let skill_path = path.join("SKILL.md");
+                        if !skill_path.is_file() {
+                            continue;
+                        }
+                        skill_path
+                    } else if path
+                        .extension()
+                        .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("md"))
+                    {
+                        path
+                    } else {
+                        continue;
+                    };
+
+                    let contents = fs::read_to_string(&markdown_path)?;
+                    let fallback_name = markdown_path.file_stem().map_or_else(
+                        || entry.file_name().to_string_lossy().to_string(),
+                        |stem| stem.to_string_lossy().to_string(),
+                    );
+                    let (name, _) = parse_skill_frontmatter(&contents);
+                    entries.push((name.unwrap_or(fallback_name), markdown_path));
+                }
+            }
+        }
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        if let Some((_, path)) = entries
+            .into_iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(requested))
+        {
+            return Ok(path);
+        }
     }
 
-    git_status_ok(cwd, &["add", "-A"])?;
-    let path = write_temp_text_file("claw-commit-message", "txt", message)?;
-    let path_string = path.to_string_lossy().into_owned();
-    git_status_ok(cwd, &["commit", "--file", path_string.as_str()])?;
-
-    Ok(format!(
-        "Commit\n  Result           created\n  Message file     {}\n\n{}",
-        path.display(),
-        message
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("unknown skill: {requested}"),
     ))
 }
 
-pub fn handle_commit_push_pr_slash_command(
-    request: &CommitPushPrRequest,
+fn render_mcp_report_for(
+    loader: &ConfigLoader,
     cwd: &Path,
-) -> io::Result<String> {
-    if !command_exists("gh") {
-        return Err(io::Error::other("gh CLI is required for /commit-push-pr"));
-    }
-
-    let default_branch = detect_default_branch(cwd)?;
-    let mut branch = current_branch(cwd)?;
-    let mut created_branch = false;
-    if branch == default_branch {
-        let hint = if request.branch_name_hint.trim().is_empty() {
-            request.pr_title.as_str()
-        } else {
-            request.branch_name_hint.as_str()
-        };
-        let next_branch = build_branch_name(hint);
-        git_status_ok(cwd, &["switch", "-c", next_branch.as_str()])?;
-        branch = next_branch;
-        created_branch = true;
-    }
-
-    let workspace_has_changes = !git_stdout(cwd, &["status", "--short"])?.trim().is_empty();
-    let commit_report = if workspace_has_changes {
-        let Some(message) = request.commit_message.as_deref() else {
-            return Err(io::Error::other(
-                "commit message is required when workspace changes are present",
-            ));
-        };
-        Some(handle_commit_slash_command(message, cwd)?)
-    } else {
-        None
-    };
-
-    let branch_diff = git_stdout(
-        cwd,
-        &["diff", "--stat", &format!("{default_branch}...HEAD")],
-    )?;
-    if branch_diff.trim().is_empty() {
-        return Ok(
-            "Commit/Push/PR\n  Result           skipped\n  Reason           no branch changes to push or open as a pull request"
-                .to_string(),
-        );
-    }
-
-    git_status_ok(cwd, &["push", "--set-upstream", "origin", branch.as_str()])?;
-
-    let body_path = write_temp_text_file("claw-pr-body", "md", request.pr_body.trim())?;
-    let body_path_string = body_path.to_string_lossy().into_owned();
-    let create = Command::new("gh")
-        .args([
-            "pr",
-            "create",
-            "--title",
-            request.pr_title.as_str(),
-            "--body-file",
-            body_path_string.as_str(),
-            "--base",
-            default_branch.as_str(),
-        ])
-        .current_dir(cwd)
-        .output()?;
-
-    let (result, url) = if create.status.success() {
-        (
-            "created",
-            parse_pr_url(&String::from_utf8_lossy(&create.stdout))
-                .unwrap_or_else(|| "<unknown>".to_string()),
-        )
-    } else {
-        let view = Command::new("gh")
-            .args(["pr", "view", "--json", "url"])
-            .current_dir(cwd)
-            .output()?;
-        if !view.status.success() {
-            return Err(io::Error::other(command_failure(
-                "gh",
-                &["pr", "create"],
-                &create,
-            )));
-        }
-        (
-            "existing",
-            parse_pr_json_url(&String::from_utf8_lossy(&view.stdout))
-                .unwrap_or_else(|| "<unknown>".to_string()),
-        )
-    };
-
-    let mut lines = vec![
-        "Commit/Push/PR".to_string(),
-        format!("  Result           {result}"),
-        format!("  Branch           {branch}"),
-        format!("  Base             {default_branch}"),
-        format!("  Body file        {}", body_path.display()),
-        format!("  URL              {url}"),
-    ];
-    if created_branch {
-        lines.insert(2, "  Branch action    created and switched".to_string());
-    }
-    if let Some(report) = commit_report {
-        lines.push(String::new());
-        lines.push(report);
-    }
-    Ok(lines.join("\n"))
-}
-
-pub fn detect_default_branch(cwd: &Path) -> io::Result<String> {
-    if let Ok(reference) = git_stdout(cwd, &["symbolic-ref", "refs/remotes/origin/HEAD"]) {
-        if let Some(branch) = reference
-            .trim()
-            .rsplit('/')
-            .next()
-            .filter(|value| !value.is_empty())
-        {
-            return Ok(branch.to_string());
+    args: Option<&str>,
+) -> Result<String, runtime::ConfigError> {
+    if let Some(args) = normalize_optional_args(args) {
+        if let Some(help_path) = help_path_from_args(args) {
+            return Ok(match help_path.as_slice() {
+                [] => render_mcp_usage(None),
+                ["show", ..] => render_mcp_usage(Some("show")),
+                _ => render_mcp_usage(Some(&help_path.join(" "))),
+            });
         }
     }
 
-    for branch in ["main", "master"] {
-        if branch_exists(cwd, branch) {
-            return Ok(branch.to_string());
+    match normalize_optional_args(args) {
+        None | Some("list") => {
+            let runtime_config = loader.load()?;
+            Ok(render_mcp_summary_report(
+                cwd,
+                runtime_config.mcp().servers(),
+            ))
+        }
+        Some(args) if is_help_arg(args) => Ok(render_mcp_usage(None)),
+        Some("show") => Ok(render_mcp_usage(Some("show"))),
+        Some(args) if args.split_whitespace().next() == Some("show") => {
+            let mut parts = args.split_whitespace();
+            let _ = parts.next();
+            let Some(server_name) = parts.next() else {
+                return Ok(render_mcp_usage(Some("show")));
+            };
+            if parts.next().is_some() {
+                return Ok(render_mcp_usage(Some(args)));
+            }
+            let runtime_config = loader.load()?;
+            Ok(render_mcp_server_report(
+                cwd,
+                server_name,
+                runtime_config.mcp().get(server_name),
+            ))
+        }
+        Some(args) => Ok(render_mcp_usage(Some(args))),
+    }
+}
+
+fn render_mcp_report_json_for(
+    loader: &ConfigLoader,
+    cwd: &Path,
+    args: Option<&str>,
+) -> Result<Value, runtime::ConfigError> {
+    if let Some(args) = normalize_optional_args(args) {
+        if let Some(help_path) = help_path_from_args(args) {
+            return Ok(match help_path.as_slice() {
+                [] => render_mcp_usage_json(None),
+                ["show", ..] => render_mcp_usage_json(Some("show")),
+                _ => render_mcp_usage_json(Some(&help_path.join(" "))),
+            });
         }
     }
 
-    current_branch(cwd)
-}
-
-fn git_stdout(cwd: &Path, args: &[&str]) -> io::Result<String> {
-    run_command_stdout("git", args, cwd)
-}
-
-fn git_status_ok(cwd: &Path, args: &[&str]) -> io::Result<()> {
-    run_command_success("git", args, cwd)
-}
-
-fn run_command_stdout(program: &str, args: &[&str], cwd: &Path) -> io::Result<String> {
-    let output = Command::new(program).args(args).current_dir(cwd).output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(command_failure(program, args, &output)));
-    }
-    String::from_utf8(output.stdout)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-}
-
-fn run_command_success(program: &str, args: &[&str], cwd: &Path) -> io::Result<()> {
-    let output = Command::new(program).args(args).current_dir(cwd).output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(command_failure(program, args, &output)));
-    }
-    Ok(())
-}
-
-fn command_failure(program: &str, args: &[&str], output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let detail = if stderr.is_empty() { stdout } else { stderr };
-    if detail.is_empty() {
-        format!("{program} {} failed", args.join(" "))
-    } else {
-        format!("{program} {} failed: {detail}", args.join(" "))
-    }
-}
-
-fn branch_exists(cwd: &Path, branch: &str) -> bool {
-    Command::new("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
-        ])
-        .current_dir(cwd)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn current_branch(cwd: &Path) -> io::Result<String> {
-    let branch = git_stdout(cwd, &["branch", "--show-current"])?;
-    let branch = branch.trim();
-    if branch.is_empty() {
-        Err(io::Error::other("unable to determine current git branch"))
-    } else {
-        Ok(branch.to_string())
-    }
-}
-
-fn command_exists(name: &str) -> bool {
-    Command::new(name)
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn write_temp_text_file(prefix: &str, extension: &str, contents: &str) -> io::Result<PathBuf> {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let path = env::temp_dir().join(format!("{prefix}-{nanos}.{extension}"));
-    fs::write(&path, contents)?;
-    Ok(path)
-}
-
-fn build_branch_name(hint: &str) -> String {
-    let slug = slugify(hint);
-    let owner = env::var("SAFEUSER")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            env::var("USER")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        });
-    match owner {
-        Some(owner) => format!("{owner}/{slug}"),
-        None => slug,
-    }
-}
-
-fn slugify(value: &str) -> String {
-    let mut slug = String::new();
-    let mut last_was_dash = false;
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-            last_was_dash = false;
-        } else if !last_was_dash {
-            slug.push('-');
-            last_was_dash = true;
+    match normalize_optional_args(args) {
+        None | Some("list") => {
+            let runtime_config = loader.load()?;
+            Ok(render_mcp_summary_report_json(
+                cwd,
+                runtime_config.mcp().servers(),
+            ))
         }
+        Some(args) if is_help_arg(args) => Ok(render_mcp_usage_json(None)),
+        Some("show") => Ok(render_mcp_usage_json(Some("show"))),
+        Some(args) if args.split_whitespace().next() == Some("show") => {
+            let mut parts = args.split_whitespace();
+            let _ = parts.next();
+            let Some(server_name) = parts.next() else {
+                return Ok(render_mcp_usage_json(Some("show")));
+            };
+            if parts.next().is_some() {
+                return Ok(render_mcp_usage_json(Some(args)));
+            }
+            let runtime_config = loader.load()?;
+            Ok(render_mcp_server_report_json(
+                cwd,
+                server_name,
+                runtime_config.mcp().get(server_name),
+            ))
+        }
+        Some(args) => Ok(render_mcp_usage_json(Some(args))),
     }
-    let slug = slug.trim_matches('-').to_string();
-    if slug.is_empty() {
-        "change".to_string()
-    } else {
-        slug
-    }
-}
-
-fn parse_pr_url(stdout: &str) -> Option<String> {
-    stdout
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("http://") || line.starts_with("https://"))
-        .map(ToOwned::to_owned)
-}
-
-fn parse_pr_json_url(stdout: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(stdout)
-        .ok()?
-        .get("url")?
-        .as_str()
-        .map(ToOwned::to_owned)
 }
 
 #[must_use]
@@ -1488,8 +2576,8 @@ fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, P
         );
         push_unique_root(
             &mut roots,
-            DefinitionSource::ProjectClaw,
-            ancestor.join(".claw").join(leaf),
+            DefinitionSource::ProjectClaude,
+            ancestor.join(".claude").join(leaf),
         );
     }
 
@@ -1531,8 +2619,8 @@ fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, P
         );
         push_unique_root(
             &mut roots,
-            DefinitionSource::UserClaw,
-            home.join(".claw").join(leaf),
+            DefinitionSource::UserClaude,
+            home.join(".claude").join(leaf),
         );
     }
 
@@ -1570,8 +2658,8 @@ fn discover_skill_roots(cwd: &Path) -> Vec<SkillRoot> {
         );
         push_unique_skill_root(
             &mut roots,
-            DefinitionSource::ProjectClaw,
-            ancestor.join(".claw").join("skills"),
+            DefinitionSource::ProjectClaude,
+            ancestor.join(".claude").join("skills"),
             SkillOrigin::SkillsDir,
         );
         push_unique_skill_root(
@@ -1588,8 +2676,8 @@ fn discover_skill_roots(cwd: &Path) -> Vec<SkillRoot> {
         );
         push_unique_skill_root(
             &mut roots,
-            DefinitionSource::ProjectClaw,
-            ancestor.join(".claw").join("commands"),
+            DefinitionSource::ProjectClaude,
+            ancestor.join(".claude").join("commands"),
             SkillOrigin::LegacyCommandsDir,
         );
     }
@@ -1660,14 +2748,20 @@ fn discover_skill_roots(cwd: &Path) -> Vec<SkillRoot> {
         );
         push_unique_skill_root(
             &mut roots,
-            DefinitionSource::UserClaw,
-            home.join(".claw").join("skills"),
+            DefinitionSource::UserClaude,
+            home.join(".claude").join("skills"),
             SkillOrigin::SkillsDir,
         );
         push_unique_skill_root(
             &mut roots,
-            DefinitionSource::UserClaw,
-            home.join(".claw").join("commands"),
+            DefinitionSource::UserClaude,
+            home.join(".claude").join("skills").join("omc-learned"),
+            SkillOrigin::SkillsDir,
+        );
+        push_unique_skill_root(
+            &mut roots,
+            DefinitionSource::UserClaude,
+            home.join(".claude").join("commands"),
             SkillOrigin::LegacyCommandsDir,
         );
     }
@@ -2126,12 +3220,10 @@ fn render_agents_report(agents: &[AgentSummary]) -> String {
         String::new(),
     ];
 
-    for source in [
-        DefinitionSource::ProjectCodex,
-        DefinitionSource::ProjectClaw,
-        DefinitionSource::UserCodexHome,
-        DefinitionSource::UserCodex,
-        DefinitionSource::UserClaw,
+    for scope in [
+        DefinitionScope::Project,
+        DefinitionScope::UserConfigHome,
+        DefinitionScope::UserHome,
     ] {
         let group = agents
             .iter()
@@ -2203,12 +3295,10 @@ fn render_skills_report(skills: &[SkillSummary]) -> String {
         String::new(),
     ];
 
-    for source in [
-        DefinitionSource::ProjectCodex,
-        DefinitionSource::ProjectClaw,
-        DefinitionSource::UserCodexHome,
-        DefinitionSource::UserCodex,
-        DefinitionSource::UserClaw,
+    for scope in [
+        DefinitionScope::Project,
+        DefinitionScope::UserConfigHome,
+        DefinitionScope::UserHome,
     ] {
         let group = skills
             .iter()
@@ -2454,9 +3544,9 @@ fn help_path_from_args(args: &str) -> Option<Vec<&str>> {
 fn render_agents_usage(unexpected: Option<&str>) -> String {
     let mut lines = vec![
         "Agents".to_string(),
-        "  Usage            /agents".to_string(),
+        "  Usage            /agents [list|help]".to_string(),
         "  Direct CLI       claw agents".to_string(),
-        "  Sources          .codex/agents, .claw/agents, $CODEX_HOME/agents".to_string(),
+        "  Sources          .claw/agents, ~/.claw/agents, $CLAW_CONFIG_HOME/agents".to_string(),
     ];
     if let Some(args) = unexpected {
         lines.push(format!("  Unexpected       {args}"));
@@ -2480,9 +3570,12 @@ fn render_agents_usage_json(unexpected: Option<&str>) -> Value {
 fn render_skills_usage(unexpected: Option<&str>) -> String {
     let mut lines = vec![
         "Skills".to_string(),
-        "  Usage            /skills".to_string(),
-        "  Direct CLI       claw skills".to_string(),
-        "  Sources          .codex/skills, .claw/skills, legacy /commands".to_string(),
+        "  Usage            /skills [list|install <path>|help|<skill> [args]]".to_string(),
+        "  Alias            /skill".to_string(),
+        "  Direct CLI       claw skills [list|install <path>|help|<skill> [args]]".to_string(),
+        "  Invoke           /skills help overview -> $help overview".to_string(),
+        "  Install root     $CLAW_CONFIG_HOME/skills or ~/.claw/skills".to_string(),
+        "  Sources          .claw/skills, .omc/skills, .agents/skills, .codex/skills, .claude/skills, ~/.claw/skills, ~/.omc/skills, ~/.claude/skills/omc-learned, ~/.codex/skills, ~/.claude/skills, legacy /commands".to_string(),
     ];
     if let Some(args) = unexpected {
         lines.push(format!("  Unexpected       {args}"));
@@ -2759,7 +3852,18 @@ pub fn handle_slash_command(
     session: &Session,
     compaction: CompactionConfig,
 ) -> Option<SlashCommandResult> {
-    match SlashCommand::parse(input)? {
+    let command = match SlashCommand::parse(input) {
+        Ok(Some(command)) => command,
+        Ok(None) => return None,
+        Err(error) => {
+            return Some(SlashCommandResult {
+                message: error.to_string(),
+                session: session.clone(),
+            });
+        }
+    };
+
+    match command {
         SlashCommand::Compact => {
             let result = compact_session(session, compaction);
             let message = if result.removed_message_count == 0 {
@@ -2780,16 +3884,14 @@ pub fn handle_slash_command(
             session: session.clone(),
         }),
         SlashCommand::Status
-        | SlashCommand::Branch { .. }
         | SlashCommand::Bughunter { .. }
-        | SlashCommand::Worktree { .. }
         | SlashCommand::Commit
-        | SlashCommand::CommitPushPr { .. }
         | SlashCommand::Pr { .. }
         | SlashCommand::Issue { .. }
         | SlashCommand::Ultraplan { .. }
         | SlashCommand::Teleport { .. }
         | SlashCommand::DebugToolCall
+        | SlashCommand::Sandbox
         | SlashCommand::Model { .. }
         | SlashCommand::Permissions { .. }
         | SlashCommand::Clear { .. }
@@ -2854,25 +3956,24 @@ pub fn handle_slash_command(
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_branch_slash_command, handle_commit_push_pr_slash_command,
-        handle_commit_slash_command, handle_plugins_slash_command, handle_slash_command,
-        handle_worktree_slash_command, load_agents_from_roots, load_skills_from_roots,
-        render_agents_report, render_plugins_report, render_skills_report,
-        render_slash_command_help, resume_supported_slash_commands, slash_command_specs,
-        suggest_slash_commands, CommitPushPrRequest, DefinitionSource, SkillOrigin, SkillRoot,
-        SlashCommand,
+        classify_skills_slash_command, handle_agents_slash_command_json,
+        handle_plugins_slash_command, handle_skills_slash_command_json, handle_slash_command,
+        load_agents_from_roots, load_skills_from_roots, render_agents_report,
+        render_agents_report_json, render_mcp_report_json_for, render_plugins_report,
+        render_skills_report, render_slash_command_help, render_slash_command_help_detail,
+        resolve_skill_path, resume_supported_slash_commands, slash_command_specs,
+        suggest_slash_commands, validate_slash_command_input, DefinitionSource, SkillOrigin,
+        SkillRoot, SkillSlashDispatch, SlashCommand,
     };
     use plugins::{PluginKind, PluginManager, PluginManagerConfig, PluginMetadata, PluginSummary};
-    use runtime::{CompactionConfig, ContentBlock, ConversationMessage, MessageRole, Session};
-    use std::env;
+    use runtime::{
+        CompactionConfig, ConfigLoader, ContentBlock, ConversationMessage, MessageRole, Session,
+    };
+    use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
 
     fn temp_dir(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -2882,95 +3983,22 @@ mod tests {
         std::env::temp_dir().join(format!("commands-plugin-{label}-{nanos}"))
     }
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock")
     }
 
-    fn run_command(cwd: &Path, program: &str, args: &[&str]) -> String {
-        let output = Command::new(program)
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .expect("command should run");
-        assert!(
-            output.status.success(),
-            "{} {} failed: {}",
-            program,
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).expect("stdout should be utf8")
-    }
-
-    fn init_git_repo(label: &str) -> PathBuf {
-        let root = temp_dir(label);
-        fs::create_dir_all(&root).expect("repo root");
-
-        let init = Command::new("git")
-            .args(["init", "-b", "main"])
-            .current_dir(&root)
-            .output()
-            .expect("git init should run");
-        if !init.status.success() {
-            let fallback = Command::new("git")
-                .arg("init")
-                .current_dir(&root)
-                .output()
-                .expect("fallback git init should run");
-            assert!(
-                fallback.status.success(),
-                "fallback git init should succeed"
-            );
-            let rename = Command::new("git")
-                .args(["branch", "-m", "main"])
-                .current_dir(&root)
-                .output()
-                .expect("git branch -m should run");
-            assert!(rename.status.success(), "git branch -m main should succeed");
+    fn restore_env_var(key: &str, original: Option<OsString>) {
+        match original {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
         }
-
-        run_command(&root, "git", &["config", "user.name", "Claw Tests"]);
-        run_command(&root, "git", &["config", "user.email", "claw@example.com"]);
-        fs::write(root.join("README.md"), "seed\n").expect("seed file");
-        run_command(&root, "git", &["add", "README.md"]);
-        run_command(&root, "git", &["commit", "-m", "chore: seed repo"]);
-        root
-    }
-
-    fn init_bare_repo(label: &str) -> PathBuf {
-        let root = temp_dir(label);
-        let output = Command::new("git")
-            .args(["init", "--bare"])
-            .arg(&root)
-            .output()
-            .expect("bare repo should initialize");
-        assert!(output.status.success(), "git init --bare should succeed");
-        root
-    }
-
-    #[cfg(unix)]
-    fn write_fake_gh(bin_dir: &Path, log_path: &Path, url: &str) {
-        fs::create_dir_all(bin_dir).expect("bin dir");
-        let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'gh 1.0.0'\n  exit 0\nfi\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then\n  echo '{}'\n  exit 0\nfi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then\n  echo '{{\"url\":\"{}\"}}'\n  exit 0\nfi\nexit 0\n",
-            log_path.display(),
-            url,
-            url,
-        );
-        let path = bin_dir.join("gh");
-        fs::write(&path, script).expect("gh stub");
-        let mut permissions = fs::metadata(&path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&path, permissions).expect("chmod");
     }
 
     fn write_external_plugin(root: &Path, name: &str, version: &str) {
-        fs::create_dir_all(root.join(".claw-plugin")).expect("manifest dir");
+        fs::create_dir_all(root.join(".claude-plugin")).expect("manifest dir");
         fs::write(
-            root.join(".claw-plugin").join("plugin.json"),
+            root.join(".claude-plugin").join("plugin.json"),
             format!(
                 "{{\n  \"name\": \"{name}\",\n  \"version\": \"{version}\",\n  \"description\": \"commands plugin\"\n}}"
             ),
@@ -2979,9 +4007,9 @@ mod tests {
     }
 
     fn write_bundled_plugin(root: &Path, name: &str, version: &str, default_enabled: bool) {
-        fs::create_dir_all(root.join(".claw-plugin")).expect("manifest dir");
+        fs::create_dir_all(root.join(".claude-plugin")).expect("manifest dir");
         fs::write(
-            root.join(".claw-plugin").join("plugin.json"),
+            root.join(".claude-plugin").join("plugin.json"),
             format!(
                 "{{\n  \"name\": \"{name}\",\n  \"version\": \"{version}\",\n  \"description\": \"bundled commands plugin\",\n  \"defaultEnabled\": {}\n}}",
                 if default_enabled { "true" } else { "false" }
@@ -3020,145 +4048,198 @@ mod tests {
         .expect("write command");
     }
 
+    fn parse_error_message(input: &str) -> String {
+        SlashCommand::parse(input)
+            .expect_err("slash command should be rejected")
+            .to_string()
+    }
+
     #[allow(clippy::too_many_lines)]
     #[test]
     fn parses_supported_slash_commands() {
-        assert_eq!(SlashCommand::parse("/help"), Some(SlashCommand::Help));
-        assert_eq!(SlashCommand::parse(" /status "), Some(SlashCommand::Status));
+        assert_eq!(SlashCommand::parse("/help"), Ok(Some(SlashCommand::Help)));
+        assert_eq!(
+            SlashCommand::parse(" /status "),
+            Ok(Some(SlashCommand::Status))
+        );
+        assert_eq!(
+            SlashCommand::parse("/sandbox"),
+            Ok(Some(SlashCommand::Sandbox))
+        );
         assert_eq!(
             SlashCommand::parse("/bughunter runtime"),
-            Some(SlashCommand::Bughunter {
+            Ok(Some(SlashCommand::Bughunter {
                 scope: Some("runtime".to_string())
-            })
+            }))
         );
         assert_eq!(
-            SlashCommand::parse("/branch create feature/demo"),
-            Some(SlashCommand::Branch {
-                action: Some("create".to_string()),
-                target: Some("feature/demo".to_string()),
-            })
-        );
-        assert_eq!(
-            SlashCommand::parse("/worktree add ../demo wt-demo"),
-            Some(SlashCommand::Worktree {
-                action: Some("add".to_string()),
-                path: Some("../demo".to_string()),
-                branch: Some("wt-demo".to_string()),
-            })
-        );
-        assert_eq!(SlashCommand::parse("/commit"), Some(SlashCommand::Commit));
-        assert_eq!(
-            SlashCommand::parse("/commit-push-pr ready for review"),
-            Some(SlashCommand::CommitPushPr {
-                context: Some("ready for review".to_string())
-            })
+            SlashCommand::parse("/commit"),
+            Ok(Some(SlashCommand::Commit))
         );
         assert_eq!(
             SlashCommand::parse("/pr ready for review"),
-            Some(SlashCommand::Pr {
+            Ok(Some(SlashCommand::Pr {
                 context: Some("ready for review".to_string())
-            })
+            }))
         );
         assert_eq!(
             SlashCommand::parse("/issue flaky test"),
-            Some(SlashCommand::Issue {
+            Ok(Some(SlashCommand::Issue {
                 context: Some("flaky test".to_string())
-            })
+            }))
         );
         assert_eq!(
             SlashCommand::parse("/ultraplan ship both features"),
-            Some(SlashCommand::Ultraplan {
+            Ok(Some(SlashCommand::Ultraplan {
                 task: Some("ship both features".to_string())
-            })
+            }))
         );
         assert_eq!(
             SlashCommand::parse("/teleport conversation.rs"),
-            Some(SlashCommand::Teleport {
+            Ok(Some(SlashCommand::Teleport {
                 target: Some("conversation.rs".to_string())
-            })
+            }))
         );
         assert_eq!(
             SlashCommand::parse("/debug-tool-call"),
-            Some(SlashCommand::DebugToolCall)
+            Ok(Some(SlashCommand::DebugToolCall))
         );
         assert_eq!(
-            SlashCommand::parse("/model opus"),
-            Some(SlashCommand::Model {
-                model: Some("opus".to_string()),
-            })
+            SlashCommand::parse("/bughunter runtime"),
+            Ok(Some(SlashCommand::Bughunter {
+                scope: Some("runtime".to_string())
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/commit"),
+            Ok(Some(SlashCommand::Commit))
+        );
+        assert_eq!(
+            SlashCommand::parse("/pr ready for review"),
+            Ok(Some(SlashCommand::Pr {
+                context: Some("ready for review".to_string())
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/issue flaky test"),
+            Ok(Some(SlashCommand::Issue {
+                context: Some("flaky test".to_string())
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/ultraplan ship both features"),
+            Ok(Some(SlashCommand::Ultraplan {
+                task: Some("ship both features".to_string())
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/teleport conversation.rs"),
+            Ok(Some(SlashCommand::Teleport {
+                target: Some("conversation.rs".to_string())
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/debug-tool-call"),
+            Ok(Some(SlashCommand::DebugToolCall))
+        );
+        assert_eq!(
+            SlashCommand::parse("/model claude-opus"),
+            Ok(Some(SlashCommand::Model {
+                model: Some("claude-opus".to_string()),
+            }))
         );
         assert_eq!(
             SlashCommand::parse("/model"),
-            Some(SlashCommand::Model { model: None })
+            Ok(Some(SlashCommand::Model { model: None }))
         );
         assert_eq!(
             SlashCommand::parse("/permissions read-only"),
-            Some(SlashCommand::Permissions {
+            Ok(Some(SlashCommand::Permissions {
                 mode: Some("read-only".to_string()),
-            })
+            }))
         );
         assert_eq!(
             SlashCommand::parse("/clear"),
-            Some(SlashCommand::Clear { confirm: false })
+            Ok(Some(SlashCommand::Clear { confirm: false }))
         );
         assert_eq!(
             SlashCommand::parse("/clear --confirm"),
-            Some(SlashCommand::Clear { confirm: true })
+            Ok(Some(SlashCommand::Clear { confirm: true }))
         );
-        assert_eq!(SlashCommand::parse("/cost"), Some(SlashCommand::Cost));
+        assert_eq!(SlashCommand::parse("/cost"), Ok(Some(SlashCommand::Cost)));
         assert_eq!(
             SlashCommand::parse("/resume session.json"),
-            Some(SlashCommand::Resume {
+            Ok(Some(SlashCommand::Resume {
                 session_path: Some("session.json".to_string()),
-            })
+            }))
         );
         assert_eq!(
             SlashCommand::parse("/config"),
-            Some(SlashCommand::Config { section: None })
+            Ok(Some(SlashCommand::Config { section: None }))
         );
         assert_eq!(
             SlashCommand::parse("/config env"),
-            Some(SlashCommand::Config {
+            Ok(Some(SlashCommand::Config {
                 section: Some("env".to_string())
-            })
+            }))
         );
-        assert_eq!(SlashCommand::parse("/memory"), Some(SlashCommand::Memory));
-        assert_eq!(SlashCommand::parse("/init"), Some(SlashCommand::Init));
-        assert_eq!(SlashCommand::parse("/diff"), Some(SlashCommand::Diff));
-        assert_eq!(SlashCommand::parse("/version"), Some(SlashCommand::Version));
+        assert_eq!(
+            SlashCommand::parse("/mcp"),
+            Ok(Some(SlashCommand::Mcp {
+                action: None,
+                target: None
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/mcp show remote"),
+            Ok(Some(SlashCommand::Mcp {
+                action: Some("show".to_string()),
+                target: Some("remote".to_string())
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/memory"),
+            Ok(Some(SlashCommand::Memory))
+        );
+        assert_eq!(SlashCommand::parse("/init"), Ok(Some(SlashCommand::Init)));
+        assert_eq!(SlashCommand::parse("/diff"), Ok(Some(SlashCommand::Diff)));
+        assert_eq!(
+            SlashCommand::parse("/version"),
+            Ok(Some(SlashCommand::Version))
+        );
         assert_eq!(
             SlashCommand::parse("/export notes.txt"),
-            Some(SlashCommand::Export {
+            Ok(Some(SlashCommand::Export {
                 path: Some("notes.txt".to_string())
-            })
+            }))
         );
         assert_eq!(
             SlashCommand::parse("/session switch abc123"),
-            Some(SlashCommand::Session {
+            Ok(Some(SlashCommand::Session {
                 action: Some("switch".to_string()),
                 target: Some("abc123".to_string())
-            })
+            }))
         );
         assert_eq!(
             SlashCommand::parse("/plugins install demo"),
-            Some(SlashCommand::Plugins {
+            Ok(Some(SlashCommand::Plugins {
                 action: Some("install".to_string()),
                 target: Some("demo".to_string())
-            })
+            }))
         );
         assert_eq!(
             SlashCommand::parse("/plugins list"),
-            Some(SlashCommand::Plugins {
+            Ok(Some(SlashCommand::Plugins {
                 action: Some("list".to_string()),
                 target: None
-            })
+            }))
         );
         assert_eq!(
             SlashCommand::parse("/plugins enable demo"),
-            Some(SlashCommand::Plugins {
+            Ok(Some(SlashCommand::Plugins {
                 action: Some("enable".to_string()),
                 target: Some("demo".to_string())
-            })
+            }))
         );
         assert_eq!(
             SlashCommand::parse("/skills install ./fixtures/help-skill"),
@@ -3168,30 +4249,186 @@ mod tests {
         );
         assert_eq!(
             SlashCommand::parse("/plugins disable demo"),
-            Some(SlashCommand::Plugins {
+            Ok(Some(SlashCommand::Plugins {
                 action: Some("disable".to_string()),
                 target: Some("demo".to_string())
-            })
+            }))
         );
+        assert_eq!(
+            SlashCommand::parse("/session fork incident-review"),
+            Ok(Some(SlashCommand::Session {
+                action: Some("fork".to_string()),
+                target: Some("incident-review".to_string())
+            }))
+        );
+    }
+
+    #[test]
+    fn parses_history_command_without_count() {
+        // given
+        let input = "/history";
+
+        // when
+        let parsed = SlashCommand::parse(input);
+
+        // then
+        assert_eq!(parsed, Ok(Some(SlashCommand::History { count: None })));
+    }
+
+    #[test]
+    fn parses_history_command_with_numeric_count() {
+        // given
+        let input = "/history 25";
+
+        // when
+        let parsed = SlashCommand::parse(input);
+
+        // then
+        assert_eq!(
+            parsed,
+            Ok(Some(SlashCommand::History {
+                count: Some("25".to_string())
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_history_with_extra_arguments() {
+        // given
+        let input = "/history 25 extra";
+
+        // when
+        let error = parse_error_message(input);
+
+        // then
+        assert!(error.contains("Usage: /history [count]"));
+    }
+
+    #[test]
+    fn rejects_unexpected_arguments_for_no_arg_commands() {
+        // given
+        let input = "/compact now";
+
+        // when
+        let error = parse_error_message(input);
+
+        // then
+        assert!(error.contains("Unexpected arguments for /compact."));
+        assert!(error.contains("  Usage            /compact"));
+        assert!(error.contains("  Summary          Compact local session history"));
+    }
+
+    #[test]
+    fn rejects_invalid_argument_values() {
+        // given
+        let input = "/permissions admin";
+
+        // when
+        let error = parse_error_message(input);
+
+        // then
+        assert!(error.contains(
+            "Unsupported /permissions mode 'admin'. Use read-only, workspace-write, or danger-full-access."
+        ));
+        assert!(error.contains(
+            "  Usage            /permissions [read-only|workspace-write|danger-full-access]"
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_required_arguments() {
+        // given
+        let input = "/teleport";
+
+        // when
+        let error = parse_error_message(input);
+
+        // then
+        assert!(error.contains("Usage: /teleport <symbol-or-path>"));
+        assert!(error.contains("  Category         Tools"));
+    }
+
+    #[test]
+    fn rejects_invalid_session_and_plugin_shapes() {
+        // given
+        let session_input = "/session switch";
+        let plugin_input = "/plugins list extra";
+
+        // when
+        let session_error = parse_error_message(session_input);
+        let plugin_error = parse_error_message(plugin_input);
+
+        // then
+        assert!(session_error.contains("Usage: /session switch <session-id>"));
+        assert!(session_error.contains("/session"));
+        assert!(plugin_error.contains("Usage: /plugin list"));
+        assert!(plugin_error.contains("Aliases          /plugins, /marketplace"));
+    }
+
+    #[test]
+    fn rejects_invalid_agents_arguments() {
+        // given
+        let agents_input = "/agents show planner";
+
+        // when
+        let agents_error = parse_error_message(agents_input);
+
+        // then
+        assert!(agents_error.contains(
+            "Unexpected arguments for /agents: show planner. Use /agents, /agents list, or /agents help."
+        ));
+        assert!(agents_error.contains("  Usage            /agents [list|help]"));
+    }
+
+    #[test]
+    fn accepts_skills_invocation_arguments_for_prompt_dispatch() {
+        assert_eq!(
+            SlashCommand::parse("/skills help overview"),
+            Ok(Some(SlashCommand::Skills {
+                args: Some("help overview".to_string()),
+            }))
+        );
+        assert_eq!(
+            classify_skills_slash_command(Some("help overview")),
+            SkillSlashDispatch::Invoke("$help overview".to_string())
+        );
+        assert_eq!(
+            classify_skills_slash_command(Some("/test")),
+            SkillSlashDispatch::Invoke("$test".to_string())
+        );
+        assert_eq!(
+            classify_skills_slash_command(Some("install ./skill-pack")),
+            SkillSlashDispatch::Local
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_mcp_arguments() {
+        let show_error = parse_error_message("/mcp show alpha beta");
+        assert!(show_error.contains("Unexpected arguments for /mcp show."));
+        assert!(show_error.contains("  Usage            /mcp show <server>"));
+
+        let action_error = parse_error_message("/mcp inspect alpha");
+        assert!(action_error
+            .contains("Unknown /mcp action 'inspect'. Use list, show <server>, or help."));
+        assert!(action_error.contains("  Usage            /mcp [list|show <server>|help]"));
     }
 
     #[test]
     fn renders_help_from_shared_specs() {
         let help = render_slash_command_help();
-        assert!(help.contains("available via claw --resume SESSION.json"));
-        assert!(help.contains("Core flow"));
-        assert!(help.contains("Workspace & memory"));
-        assert!(help.contains("Sessions & output"));
-        assert!(help.contains("Git & GitHub"));
-        assert!(help.contains("Automation & discovery"));
+        assert!(help.contains("Start here        /status, /diff, /agents, /skills, /commit"));
+        assert!(help.contains("[resume]          also works with --resume SESSION.jsonl"));
+        assert!(help.contains("Session"));
+        assert!(help.contains("Tools"));
+        assert!(help.contains("Config"));
+        assert!(help.contains("Debug"));
         assert!(help.contains("/help"));
         assert!(help.contains("/status"));
+        assert!(help.contains("/sandbox"));
         assert!(help.contains("/compact"));
         assert!(help.contains("/bughunter [scope]"));
-        assert!(help.contains("/branch [list|create <name>|switch <name>]"));
-        assert!(help.contains("/worktree [list|add <path> [branch]|remove <path>|prune]"));
         assert!(help.contains("/commit"));
-        assert!(help.contains("/commit-push-pr [context]"));
         assert!(help.contains("/pr [context]"));
         assert!(help.contains("/issue [context]"));
         assert!(help.contains("/ultraplan [task]"));
@@ -3209,39 +4446,135 @@ mod tests {
         assert!(help.contains("/diff"));
         assert!(help.contains("/version"));
         assert!(help.contains("/export [file]"));
-        assert!(help.contains("/session [list|switch <session-id>]"));
+        assert!(help.contains("/session [list|switch <session-id>|fork [branch-name]]"));
+        assert!(help.contains("/sandbox"));
         assert!(help.contains(
             "/plugin [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]"
         ));
         assert!(help.contains("aliases: /plugins, /marketplace"));
-        assert!(help.contains("/agents"));
-        assert!(help.contains("/skills"));
-        assert_eq!(slash_command_specs().len(), 28);
-        assert_eq!(resume_supported_slash_commands().len(), 13);
+        assert!(help.contains("/agents [list|help]"));
+        assert!(help.contains("/skills [list|install <path>|help|<skill> [args]]"));
+        assert!(help.contains("aliases: /skill"));
+        assert_eq!(slash_command_specs().len(), 141);
+        assert!(resume_supported_slash_commands().len() >= 39);
     }
 
     #[test]
-    fn suggests_close_slash_commands() {
+    fn renders_help_with_grouped_categories_and_keyboard_shortcuts() {
+        // given
+        let categories = ["Session", "Tools", "Config", "Debug"];
+
+        // when
+        let help = render_slash_command_help();
+
+        // then
+        for category in categories {
+            assert!(
+                help.contains(category),
+                "expected help to contain category {category}"
+            );
+        }
+        let session_index = help.find("Session").expect("Session header should exist");
+        let tools_index = help.find("Tools").expect("Tools header should exist");
+        let config_index = help.find("Config").expect("Config header should exist");
+        let debug_index = help.find("Debug").expect("Debug header should exist");
+        assert!(session_index < tools_index);
+        assert!(tools_index < config_index);
+        assert!(config_index < debug_index);
+
+        assert!(help.contains("Keyboard shortcuts"));
+        assert!(help.contains("Up/Down              Navigate prompt history"));
+        assert!(help.contains("Tab                  Complete commands, modes, and recent sessions"));
+        assert!(help.contains("Ctrl-C               Clear input (or exit on empty prompt)"));
+        assert!(help.contains("Shift+Enter/Ctrl+J   Insert a newline"));
+
+        // every command should still render with a summary line
+        for spec in slash_command_specs() {
+            let usage = match spec.argument_hint {
+                Some(hint) => format!("/{} {hint}", spec.name),
+                None => format!("/{}", spec.name),
+            };
+            assert!(
+                help.contains(&usage),
+                "expected help to contain command {usage}"
+            );
+            assert!(
+                help.contains(spec.summary),
+                "expected help to contain summary for /{}",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn renders_per_command_help_detail() {
+        // given
+        let command = "plugins";
+
+        // when
+        let help = render_slash_command_help_detail(command).expect("detail help should exist");
+
+        // then
+        assert!(help.contains("/plugin"));
+        assert!(help.contains("Summary          Manage Claw Code plugins"));
+        assert!(help.contains("Aliases          /plugins, /marketplace"));
+        assert!(help.contains("Category         Tools"));
+    }
+
+    #[test]
+    fn renders_per_command_help_detail_for_mcp() {
+        let help = render_slash_command_help_detail("mcp").expect("detail help should exist");
+        assert!(help.contains("/mcp"));
+        assert!(help.contains("Summary          Inspect configured MCP servers"));
+        assert!(help.contains("Category         Tools"));
+        assert!(help.contains("Resume           Supported with --resume SESSION.jsonl"));
+    }
+
+    #[test]
+    fn validate_slash_command_input_rejects_extra_single_value_arguments() {
+        // given
+        let session_input = "/session switch current next";
+        let plugin_input = "/plugin enable demo extra";
+
+        // when
+        let session_error = validate_slash_command_input(session_input)
+            .expect_err("session input should be rejected")
+            .to_string();
+        let plugin_error = validate_slash_command_input(plugin_input)
+            .expect_err("plugin input should be rejected")
+            .to_string();
+
+        // then
+        assert!(session_error.contains("Unexpected arguments for /session switch."));
+        assert!(session_error.contains("  Usage            /session switch <session-id>"));
+        assert!(plugin_error.contains("Unexpected arguments for /plugin enable."));
+        assert!(plugin_error.contains("  Usage            /plugin enable <name>"));
+    }
+
+    #[test]
+    fn suggests_closest_slash_commands_for_typos_and_aliases() {
         let suggestions = suggest_slash_commands("stats", 3);
-        assert!(!suggestions.is_empty());
-        assert_eq!(suggestions[0], "/status");
+        assert!(suggestions.contains(&"/stats".to_string()));
+        assert!(suggestions.contains(&"/status".to_string()));
+        assert!(suggestions.len() <= 3);
+        let plugin_suggestions = suggest_slash_commands("/plugns", 3);
+        assert!(plugin_suggestions.contains(&"/plugin".to_string()));
+        assert_eq!(suggest_slash_commands("zzz", 3), Vec::<String>::new());
     }
 
     #[test]
     fn compacts_sessions_via_slash_command() {
-        let session = Session {
-            version: 1,
-            messages: vec![
-                ConversationMessage::user_text("a ".repeat(200)),
-                ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "b ".repeat(200),
-                }]),
-                ConversationMessage::tool_result("1", "bash", "ok ".repeat(200), false),
-                ConversationMessage::assistant(vec![ContentBlock::Text {
-                    text: "recent".to_string(),
-                }]),
-            ],
-        };
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("a ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "b ".repeat(200),
+            }]),
+            ConversationMessage::tool_result("1", "bash", "ok ".repeat(200), false),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "recent".to_string(),
+            }]),
+        ];
 
         let result = handle_slash_command(
             "/compact",
@@ -3271,22 +4604,11 @@ mod tests {
         let session = Session::new();
         assert!(handle_slash_command("/unknown", &session, CompactionConfig::default()).is_none());
         assert!(handle_slash_command("/status", &session, CompactionConfig::default()).is_none());
-        assert!(
-            handle_slash_command("/branch list", &session, CompactionConfig::default()).is_none()
-        );
+        assert!(handle_slash_command("/sandbox", &session, CompactionConfig::default()).is_none());
         assert!(
             handle_slash_command("/bughunter", &session, CompactionConfig::default()).is_none()
         );
-        assert!(
-            handle_slash_command("/worktree list", &session, CompactionConfig::default()).is_none()
-        );
         assert!(handle_slash_command("/commit", &session, CompactionConfig::default()).is_none());
-        assert!(handle_slash_command(
-            "/commit-push-pr review notes",
-            &session,
-            CompactionConfig::default()
-        )
-        .is_none());
         assert!(handle_slash_command("/pr", &session, CompactionConfig::default()).is_none());
         assert!(handle_slash_command("/issue", &session, CompactionConfig::default()).is_none());
         assert!(
@@ -3300,7 +4622,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            handle_slash_command("/model sonnet", &session, CompactionConfig::default()).is_none()
+            handle_slash_command("/model claude", &session, CompactionConfig::default()).is_none()
         );
         assert!(handle_slash_command(
             "/permissions read-only",
@@ -3316,6 +4638,12 @@ mod tests {
         assert!(handle_slash_command("/cost", &session, CompactionConfig::default()).is_none());
         assert!(handle_slash_command(
             "/resume session.json",
+            &session,
+            CompactionConfig::default()
+        )
+        .is_none());
+        assert!(handle_slash_command(
+            "/resume session.jsonl",
             &session,
             CompactionConfig::default()
         )
@@ -3496,7 +4824,7 @@ mod tests {
     fn lists_skills_from_project_and_user_roots() {
         let workspace = temp_dir("skills-workspace");
         let project_skills = workspace.join(".codex").join("skills");
-        let project_commands = workspace.join(".claw").join("commands");
+        let project_commands = workspace.join(".claude").join("commands");
         let user_home = temp_dir("skills-home");
         let user_skills = user_home.join(".codex").join("skills");
 
@@ -3512,7 +4840,7 @@ mod tests {
                 origin: SkillOrigin::SkillsDir,
             },
             SkillRoot {
-                source: DefinitionSource::ProjectClaw,
+                source: DefinitionSource::ProjectClaude,
                 path: project_commands,
                 origin: SkillOrigin::LegacyCommandsDir,
             },
@@ -3529,7 +4857,6 @@ mod tests {
         assert!(report.contains("3 available skills"));
         assert!(report.contains("Project roots:"));
         assert!(report.contains("plan · Project planning guidance"));
-        assert!(report.contains("Project (.claw):"));
         assert!(report.contains("deploy · Legacy deployment guidance · legacy /commands"));
         assert!(report.contains("User home roots:"));
         assert!(report.contains("(shadowed by Project roots) plan · User planning guidance"));
@@ -3620,7 +4947,7 @@ mod tests {
 
         let agents_help =
             super::handle_agents_slash_command(Some("help"), &cwd).expect("agents help");
-        assert!(agents_help.contains("Usage            /agents"));
+        assert!(agents_help.contains("Usage            /agents [list|help]"));
         assert!(agents_help.contains("Direct CLI       claw agents"));
         assert!(agents_help
             .contains("Sources          .claw/agents, ~/.claw/agents, $CLAW_CONFIG_HOME/agents"));
@@ -3631,7 +4958,14 @@ mod tests {
 
         let skills_help =
             super::handle_skills_slash_command(Some("--help"), &cwd).expect("skills help");
-        assert!(skills_help.contains("Usage            /skills"));
+        assert!(skills_help
+            .contains("Usage            /skills [list|install <path>|help|<skill> [args]]"));
+        assert!(skills_help.contains("Alias            /skill"));
+        assert!(skills_help.contains("Invoke           /skills help overview -> $help overview"));
+        assert!(skills_help.contains("Install root     $CLAW_CONFIG_HOME/skills or ~/.claw/skills"));
+        assert!(skills_help.contains(".omc/skills"));
+        assert!(skills_help.contains(".agents/skills"));
+        assert!(skills_help.contains("~/.claude/skills/omc-learned"));
         assert!(skills_help.contains("legacy /commands"));
 
         let skills_unexpected =
@@ -4067,142 +5401,5 @@ mod tests {
 
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(bundled_root);
-    }
-
-    #[test]
-    fn branch_and_worktree_commands_manage_git_state() {
-        // given
-        let repo = init_git_repo("branch-worktree");
-        let worktree_path = repo
-            .parent()
-            .expect("repo should have parent")
-            .join("branch-worktree-linked");
-
-        // when
-        let branch_list =
-            handle_branch_slash_command(Some("list"), None, &repo).expect("branch list succeeds");
-        let created = handle_branch_slash_command(Some("create"), Some("feature/demo"), &repo)
-            .expect("branch create succeeds");
-        let switched = handle_branch_slash_command(Some("switch"), Some("main"), &repo)
-            .expect("branch switch succeeds");
-        let added = handle_worktree_slash_command(
-            Some("add"),
-            Some(worktree_path.to_str().expect("utf8 path")),
-            Some("wt-demo"),
-            &repo,
-        )
-        .expect("worktree add succeeds");
-        let listed_worktrees =
-            handle_worktree_slash_command(Some("list"), None, None, &repo).expect("list succeeds");
-        let removed = handle_worktree_slash_command(
-            Some("remove"),
-            Some(worktree_path.to_str().expect("utf8 path")),
-            None,
-            &repo,
-        )
-        .expect("remove succeeds");
-
-        // then
-        assert!(branch_list.contains("main"));
-        assert!(created.contains("feature/demo"));
-        assert!(switched.contains("main"));
-        assert!(added.contains("wt-demo"));
-        assert!(listed_worktrees.contains(worktree_path.to_str().expect("utf8 path")));
-        assert!(removed.contains("Result           removed"));
-
-        let _ = fs::remove_dir_all(repo);
-        let _ = fs::remove_dir_all(worktree_path);
-    }
-
-    #[test]
-    fn commit_command_stages_and_commits_changes() {
-        // given
-        let repo = init_git_repo("commit-command");
-        fs::write(repo.join("notes.txt"), "hello\n").expect("write notes");
-
-        // when
-        let report =
-            handle_commit_slash_command("feat: add notes", &repo).expect("commit succeeds");
-        let status = run_command(&repo, "git", &["status", "--short"]);
-        let message = run_command(&repo, "git", &["log", "-1", "--pretty=%B"]);
-
-        // then
-        assert!(report.contains("Result           created"));
-        assert!(status.trim().is_empty());
-        assert_eq!(message.trim(), "feat: add notes");
-
-        let _ = fs::remove_dir_all(repo);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn commit_push_pr_command_commits_pushes_and_creates_pr() {
-        // given
-        let _guard = env_lock();
-        let repo = init_git_repo("commit-push-pr");
-        let remote = init_bare_repo("commit-push-pr-remote");
-        run_command(
-            &repo,
-            "git",
-            &[
-                "remote",
-                "add",
-                "origin",
-                remote.to_str().expect("utf8 remote"),
-            ],
-        );
-        run_command(&repo, "git", &["push", "-u", "origin", "main"]);
-        fs::write(repo.join("feature.txt"), "feature\n").expect("write feature file");
-
-        let fake_bin = temp_dir("fake-gh-bin");
-        let gh_log = fake_bin.join("gh.log");
-        write_fake_gh(&fake_bin, &gh_log, "https://example.com/pr/123");
-
-        let previous_path = env::var_os("PATH");
-        let mut new_path = fake_bin.display().to_string();
-        if let Some(path) = &previous_path {
-            new_path.push(':');
-            new_path.push_str(&path.to_string_lossy());
-        }
-        env::set_var("PATH", &new_path);
-        let previous_safeuser = env::var_os("SAFEUSER");
-        env::set_var("SAFEUSER", "tester");
-
-        let request = CommitPushPrRequest {
-            commit_message: Some("feat: add feature file".to_string()),
-            pr_title: "Add feature file".to_string(),
-            pr_body: "## Summary\n- add feature file".to_string(),
-            branch_name_hint: "Add feature file".to_string(),
-        };
-
-        // when
-        let report =
-            handle_commit_push_pr_slash_command(&request, &repo).expect("commit-push-pr succeeds");
-        let branch = run_command(&repo, "git", &["branch", "--show-current"]);
-        let message = run_command(&repo, "git", &["log", "-1", "--pretty=%B"]);
-        let gh_invocations = fs::read_to_string(&gh_log).expect("gh log should exist");
-
-        // then
-        assert!(report.contains("Result           created"));
-        assert!(report.contains("URL              https://example.com/pr/123"));
-        assert_eq!(branch.trim(), "tester/add-feature-file");
-        assert_eq!(message.trim(), "feat: add feature file");
-        assert!(gh_invocations.contains("pr create"));
-        assert!(gh_invocations.contains("--base main"));
-
-        if let Some(path) = previous_path {
-            env::set_var("PATH", path);
-        } else {
-            env::remove_var("PATH");
-        }
-        if let Some(safeuser) = previous_safeuser {
-            env::set_var("SAFEUSER", safeuser);
-        } else {
-            env::remove_var("SAFEUSER");
-        }
-
-        let _ = fs::remove_dir_all(repo);
-        let _ = fs::remove_dir_all(remote);
-        let _ = fs::remove_dir_all(fake_bin);
     }
 }

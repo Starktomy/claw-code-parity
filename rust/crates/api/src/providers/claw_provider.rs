@@ -611,6 +611,7 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     let retryable = is_retryable_status(status);
 
     Err(ApiError::Api {
+        request_id: None,
         status,
         error_type: parsed_error
             .as_ref()

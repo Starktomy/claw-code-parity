@@ -31,6 +31,7 @@ dependencies = [
  "runtime",
  "serde",
  "serde_json",
+ "telemetry",
  "tokio",
 ]
 
@@ -196,6 +197,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "channels"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "claw-cli"
 version = "0.1.0"
 dependencies = [
@@ -207,6 +221,7 @@ dependencies = [
  "pulldown-cmark",
  "runtime",
  "rustyline",
+ "serde",
  "serde_json",
  "syntect",
  "tokio",
@@ -735,6 +750,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "parking_lot",
  "ring",
  "serde",
  "serde_json",
@@ -1317,12 +1333,14 @@ name = "runtime"
 version = "0.1.0"
 dependencies = [
  "glob",
+ "identity",
  "lsp",
  "plugins",
  "regex",
  "serde",
  "serde_json",
  "sha2",
+ "telemetry",
  "tokio",
  "walkdir",
 ]
@@ -1399,6 +1417,26 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+
+[[package]]
+name = "rusty-claude-cli"
+version = "0.1.0"
+dependencies = [
+ "api",
+ "commands",
+ "compat-harness",
+ "crossterm",
+ "mock-anthropic-service",
+ "plugins",
+ "pulldown-cmark",
+ "runtime",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "syntect",
+ "tokio",
+ "tools",
+]
 
 [[package]]
 name = "rustyline"
@@ -1673,6 +1711,14 @@ dependencies = [
  "thiserror",
  "walkdir",
  "yaml-rust",
+]
+
+[[package]]
+name = "telemetry"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

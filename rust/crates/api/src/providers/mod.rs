@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::error::ApiError;
 use crate::types::{MessageRequest, MessageResponse};
 
+pub mod anthropic;
 pub mod claw_provider;
 pub mod openai_compat;
 
@@ -30,9 +31,10 @@ pub trait Provider {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
-    ClawApi,
+    Anthropic,
     Xai,
     OpenAi,
+    ClawApi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,55 +55,28 @@ const MODEL_REGISTRY: &[(&str, ProviderMetadata)] = &[
     (
         "opus",
         ProviderMetadata {
-            provider: ProviderKind::ClawApi,
+            provider: ProviderKind::Anthropic,
             auth_env: "ANTHROPIC_API_KEY",
             base_url_env: "ANTHROPIC_BASE_URL",
-            default_base_url: claw_provider::DEFAULT_BASE_URL,
+            default_base_url: anthropic::DEFAULT_BASE_URL,
         },
     ),
     (
         "sonnet",
         ProviderMetadata {
-            provider: ProviderKind::ClawApi,
+            provider: ProviderKind::Anthropic,
             auth_env: "ANTHROPIC_API_KEY",
             base_url_env: "ANTHROPIC_BASE_URL",
-            default_base_url: claw_provider::DEFAULT_BASE_URL,
+            default_base_url: anthropic::DEFAULT_BASE_URL,
         },
     ),
     (
         "haiku",
         ProviderMetadata {
-            provider: ProviderKind::ClawApi,
+            provider: ProviderKind::Anthropic,
             auth_env: "ANTHROPIC_API_KEY",
             base_url_env: "ANTHROPIC_BASE_URL",
-            default_base_url: claw_provider::DEFAULT_BASE_URL,
-        },
-    ),
-    (
-        "claude-opus-4-6",
-        ProviderMetadata {
-            provider: ProviderKind::ClawApi,
-            auth_env: "ANTHROPIC_API_KEY",
-            base_url_env: "ANTHROPIC_BASE_URL",
-            default_base_url: claw_provider::DEFAULT_BASE_URL,
-        },
-    ),
-    (
-        "claude-sonnet-4-6",
-        ProviderMetadata {
-            provider: ProviderKind::ClawApi,
-            auth_env: "ANTHROPIC_API_KEY",
-            base_url_env: "ANTHROPIC_BASE_URL",
-            default_base_url: claw_provider::DEFAULT_BASE_URL,
-        },
-    ),
-    (
-        "claude-haiku-4-5-20251213",
-        ProviderMetadata {
-            provider: ProviderKind::ClawApi,
-            auth_env: "ANTHROPIC_API_KEY",
-            base_url_env: "ANTHROPIC_BASE_URL",
-            default_base_url: claw_provider::DEFAULT_BASE_URL,
+            default_base_url: anthropic::DEFAULT_BASE_URL,
         },
     ),
     (
@@ -159,7 +134,7 @@ pub fn resolve_model_alias(model: &str) -> String {
         .iter()
         .find_map(|(alias, metadata)| {
             (*alias == lower).then_some(match metadata.provider {
-                ProviderKind::ClawApi => match *alias {
+                ProviderKind::Anthropic => match *alias {
                     "opus" => "claude-opus-4-6",
                     "sonnet" => "claude-sonnet-4-6",
                     "haiku" => "claude-haiku-4-5-20251213",
@@ -172,6 +147,7 @@ pub fn resolve_model_alias(model: &str) -> String {
                     _ => trimmed,
                 },
                 ProviderKind::OpenAi => trimmed,
+                ProviderKind::ClawApi => trimmed,
             })
         })
         .map_or_else(|| trimmed.to_string(), ToOwned::to_owned)
@@ -180,11 +156,15 @@ pub fn resolve_model_alias(model: &str) -> String {
 #[must_use]
 pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
     let canonical = resolve_model_alias(model);
-    let lower = canonical.to_ascii_lowercase();
-    if let Some((_, metadata)) = MODEL_REGISTRY.iter().find(|(alias, _)| *alias == lower) {
-        return Some(*metadata);
+    if canonical.starts_with("claude") {
+        return Some(ProviderMetadata {
+            provider: ProviderKind::Anthropic,
+            auth_env: "ANTHROPIC_API_KEY",
+            base_url_env: "ANTHROPIC_BASE_URL",
+            default_base_url: anthropic::DEFAULT_BASE_URL,
+        });
     }
-    if lower.starts_with("grok") {
+    if canonical.starts_with("grok") {
         return Some(ProviderMetadata {
             provider: ProviderKind::Xai,
             auth_env: "XAI_API_KEY",
@@ -200,8 +180,8 @@ pub fn detect_provider_kind(model: &str) -> ProviderKind {
     if let Some(metadata) = metadata_for_model(model) {
         return metadata.provider;
     }
-    if claw_provider::has_auth_from_env_or_saved().unwrap_or(false) {
-        return ProviderKind::ClawApi;
+    if anthropic::has_auth_from_env_or_saved().unwrap_or(false) {
+        return ProviderKind::Anthropic;
     }
     if openai_compat::has_api_key("OPENAI_API_KEY") {
         return ProviderKind::OpenAi;
@@ -209,7 +189,7 @@ pub fn detect_provider_kind(model: &str) -> ProviderKind {
     if openai_compat::has_api_key("XAI_API_KEY") {
         return ProviderKind::Xai;
     }
-    ProviderKind::ClawApi
+    ProviderKind::Anthropic
 }
 
 #[must_use]
@@ -362,7 +342,7 @@ mod tests {
         assert_eq!(detect_provider_kind("grok"), ProviderKind::Xai);
         assert_eq!(
             detect_provider_kind("claude-sonnet-4-6"),
-            ProviderKind::ClawApi
+            ProviderKind::Anthropic
         );
     }
 

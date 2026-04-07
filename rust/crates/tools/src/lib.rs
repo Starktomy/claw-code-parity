@@ -11,10 +11,22 @@ use api::{
 use plugins::PluginTool;
 use reqwest::blocking::Client;
 use runtime::{
-    edit_file, execute_bash, glob_search, grep_search, load_system_prompt, read_file, write_file,
-    ApiClient, ApiRequest, AssistantEvent, BashCommandInput, ContentBlock, ConversationMessage,
-    ConversationRuntime, GrepSearchInput, MessageRole, PermissionMode, PermissionPolicy,
-    RuntimeError, Session, TokenUsage, ToolError, ToolExecutor,
+    check_freshness, dedupe_superseded_commit_events, edit_file, execute_bash, glob_search,
+    grep_search, load_system_prompt,
+    lsp_client::LspRegistry,
+    mcp_tool_bridge::McpToolRegistry,
+    permission_enforcer::{EnforcementResult, PermissionEnforcer},
+    read_file,
+    summary_compression::compress_summary_text,
+    task_registry::TaskRegistry,
+    team_cron_registry::{CronRegistry, TeamRegistry},
+    worker_boot::{WorkerReadySnapshot, WorkerRegistry},
+    write_file, ApiClient, ApiRequest, AssistantEvent, BashCommandInput, BashCommandOutput,
+    BranchFreshness, ConfigLoader, ContentBlock, ConversationMessage, ConversationRuntime,
+    GrepSearchInput, LaneCommitProvenance, LaneEvent, LaneEventBlocker, LaneEventName,
+    LaneEventStatus, LaneFailureClass, McpDegradedReport, MessageRole, PermissionMode,
+    PermissionPolicy, PromptCacheEvent, ProviderFallbackConfig, RuntimeError, Session, TaskPacket,
+    ToolError, ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -177,7 +189,10 @@ impl GlobalToolRegistry {
         self
     }
 
-    pub fn normalize_allowed_tools(&self, values: &[String]) -> Result<Option<BTreeSet<String>>, String> {
+    pub fn normalize_allowed_tools(
+        &self,
+        values: &[String],
+    ) -> Result<Option<BTreeSet<String>>, String> {
         if values.is_empty() {
             return Ok(None);
         }
@@ -186,7 +201,12 @@ impl GlobalToolRegistry {
         let canonical_names = builtin_specs
             .iter()
             .map(|spec| spec.name.to_string())
-            .chain(self.plugin_tools.iter().map(|tool| tool.definition().name.clone()))
+            .chain(
+                self.plugin_tools
+                    .iter()
+                    .map(|tool| tool.definition().name.clone()),
+            )
+            .chain(self.runtime_tools.iter().map(|tool| tool.name.clone()))
             .collect::<Vec<_>>();
         let mut name_map = canonical_names
             .iter()
@@ -246,7 +266,8 @@ impl GlobalToolRegistry {
             .plugin_tools
             .iter()
             .filter(|tool| {
-                allowed_tools.is_none_or(|allowed| allowed.contains(tool.definition().name.as_str()))
+                allowed_tools
+                    .is_none_or(|allowed| allowed.contains(tool.definition().name.as_str()))
             })
             .map(|tool| ToolDefinition {
                 name: tool.definition().name.clone(),
@@ -256,11 +277,10 @@ impl GlobalToolRegistry {
         builtin.chain(runtime).chain(plugin).collect()
     }
 
-    #[must_use]
     pub fn permission_specs(
         &self,
         allowed_tools: Option<&BTreeSet<String>>,
-    ) -> Vec<(String, PermissionMode)> {
+    ) -> Result<Vec<(String, PermissionMode)>, String> {
         let builtin = mvp_tool_specs()
             .into_iter()
             .filter(|spec| allowed_tools.is_none_or(|allowed| allowed.contains(spec.name)))
@@ -274,15 +294,46 @@ impl GlobalToolRegistry {
             .plugin_tools
             .iter()
             .filter(|tool| {
-                allowed_tools.is_none_or(|allowed| allowed.contains(tool.definition().name.as_str()))
+                allowed_tools
+                    .is_none_or(|allowed| allowed.contains(tool.definition().name.as_str()))
             })
             .map(|tool| {
-                (
-                    tool.definition().name.clone(),
-                    permission_mode_from_plugin(tool.required_permission()),
-                )
-            });
-        builtin.chain(plugin).collect()
+                permission_mode_from_plugin(tool.required_permission())
+                    .map(|permission| (tool.definition().name.clone(), permission))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(builtin.chain(runtime).chain(plugin).collect())
+    }
+
+    #[must_use]
+    pub fn has_runtime_tool(&self, name: &str) -> bool {
+        self.runtime_tools.iter().any(|tool| tool.name == name)
+    }
+
+    #[must_use]
+    pub fn search(
+        &self,
+        query: &str,
+        max_results: usize,
+        pending_mcp_servers: Option<Vec<String>>,
+        mcp_degraded: Option<McpDegradedReport>,
+    ) -> ToolSearchOutput {
+        let query = query.trim().to_string();
+        let normalized_query = normalize_tool_search_query(&query);
+        let matches = search_tool_specs(&query, max_results.max(1), &self.searchable_tool_specs());
+
+        ToolSearchOutput {
+            matches,
+            query,
+            normalized_query,
+            total_deferred_tools: self.searchable_tool_specs().len(),
+            pending_mcp_servers,
+            mcp_degraded,
+        }
+    }
+
+    pub fn set_enforcer(&mut self, enforcer: PermissionEnforcer) {
+        self.enforcer = Some(enforcer);
     }
 
     pub fn execute(&self, name: &str, input: &Value) -> Result<String, String> {
@@ -320,12 +371,12 @@ fn normalize_tool_name(value: &str) -> String {
     value.trim().replace('-', "_").to_ascii_lowercase()
 }
 
-fn permission_mode_from_plugin(value: &str) -> PermissionMode {
+fn permission_mode_from_plugin(value: &str) -> Result<PermissionMode, String> {
     match value {
-        "read-only" => PermissionMode::ReadOnly,
-        "workspace-write" => PermissionMode::WorkspaceWrite,
-        "danger-full-access" => PermissionMode::DangerFullAccess,
-        other => panic!("unsupported plugin permission: {other}"),
+        "read-only" => Ok(PermissionMode::ReadOnly),
+        "workspace-write" => Ok(PermissionMode::WorkspaceWrite),
+        "danger-full-access" => Ok(PermissionMode::DangerFullAccess),
+        other => Err(format!("unsupported plugin permission: {other}")),
     }
 }
 
@@ -343,7 +394,11 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "timeout": { "type": "integer", "minimum": 1 },
                     "description": { "type": "string" },
                     "run_in_background": { "type": "boolean" },
-                    "dangerouslyDisableSandbox": { "type": "boolean" }
+                    "dangerouslyDisableSandbox": { "type": "boolean" },
+                    "namespaceRestrictions": { "type": "boolean" },
+                    "isolateNetwork": { "type": "boolean" },
+                    "filesystemMode": { "type": "string", "enum": ["off", "workspace-only", "allow-list"] },
+                    "allowedMounts": { "type": "array", "items": { "type": "string" } }
                 },
                 "required": ["command"],
                 "additionalProperties": false
@@ -597,7 +652,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "Config",
-            description: "Get or set Claw Code settings.",
+            description: "Get or set Claude Code settings.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1913,7 +1968,7 @@ fn run_notebook_edit(input: NotebookEditInput) -> Result<String, String> {
 }
 
 fn run_sleep(input: SleepInput) -> Result<String, String> {
-    to_pretty_json(execute_sleep(input))
+    to_pretty_json(execute_sleep(input)?)
 }
 
 fn run_brief(input: BriefInput) -> Result<String, String> {
@@ -1933,7 +1988,7 @@ fn run_exit_plan_mode(input: ExitPlanModeInput) -> Result<String, String> {
 }
 
 fn run_structured_output(input: StructuredOutputInput) -> Result<String, String> {
-    to_pretty_json(execute_structured_output(input))
+    to_pretty_json(execute_structured_output(input)?)
 }
 
 fn run_repl(input: ReplInput) -> Result<String, String> {
@@ -2545,7 +2600,7 @@ fn build_http_client() -> Result<Client, String> {
     Client::builder()
         .timeout(Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::limited(10))
-        .user_agent("claw-rust-tools/0.1")
+        .user_agent("clawd-rust-tools/0.1")
         .build()
         .map_err(|error| error.to_string())
 }
@@ -2566,7 +2621,7 @@ fn normalize_fetch_url(url: &str) -> Result<String, String> {
 }
 
 fn build_search_url(query: &str) -> Result<reqwest::Url, String> {
-    if let Ok(base) = std::env::var("CLAW_WEB_SEARCH_BASE_URL") {
+    if let Ok(base) = std::env::var("CLAWD_WEB_SEARCH_BASE_URL") {
         let mut url = reqwest::Url::parse(&base).map_err(|error| error.to_string())?;
         url.query_pairs_mut().append_pair("q", query);
         return Ok(url);
@@ -2911,11 +2966,11 @@ fn validate_todos(todos: &[TodoItem]) -> Result<(), String> {
 }
 
 fn todo_store_path() -> Result<std::path::PathBuf, String> {
-    if let Ok(path) = std::env::var("CLAW_TODO_STORE") {
+    if let Ok(path) = std::env::var("CLAWD_TODO_STORE") {
         return Ok(std::path::PathBuf::from(path));
     }
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    Ok(cwd.join(".claw-todos.json"))
+    Ok(cwd.join(".clawd-todos.json"))
 }
 
 fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
@@ -3268,7 +3323,7 @@ where
 }
 
 fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
-    let thread_name = format!("claw-agent-{}", job.manifest.agent_id);
+    let thread_name = format!("clawd-agent-{}", job.manifest.agent_id);
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
@@ -3657,9 +3712,34 @@ struct ProviderRuntimeClient {
 }
 
 impl ProviderRuntimeClient {
+    #[allow(clippy::needless_pass_by_value)]
     fn new(model: String, allowed_tools: BTreeSet<String>) -> Result<Self, String> {
-        let model = resolve_model_alias(&model).to_string();
-        let client = ProviderClient::from_model(&model).map_err(|error| error.to_string())?;
+        let fallback_config = load_provider_fallback_config();
+        Self::new_with_fallback_config(model, allowed_tools, &fallback_config)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn new_with_fallback_config(
+        model: String,
+        allowed_tools: BTreeSet<String>,
+        fallback_config: &ProviderFallbackConfig,
+    ) -> Result<Self, String> {
+        let primary_model = fallback_config
+            .primary()
+            .map(str::to_string)
+            .unwrap_or(model);
+        let primary = build_provider_entry(&primary_model)?;
+        let mut chain = vec![primary];
+        for fallback_model in fallback_config.fallbacks() {
+            match build_provider_entry(fallback_model) {
+                Ok(entry) => chain.push(entry),
+                Err(error) => {
+                    eprintln!(
+                        "warning: skipping unavailable fallback provider {fallback_model}: {error}"
+                    );
+                }
+            }
+        }
         Ok(Self {
             runtime: tokio::runtime::Runtime::new().map_err(|error| error.to_string())?,
             chain,
@@ -3714,86 +3794,82 @@ impl ApiClient for ProviderRuntimeClient {
                 stream: true,
             };
 
-            while let Some(event) = stream
-                .next_event()
-                .await
-                .map_err(|error| RuntimeError::new(error.to_string()))?
-            {
-                match event {
-                    ApiStreamEvent::MessageStart(start) => {
-                        for block in start.message.content {
-                            push_output_block(block, 0, &mut events, &mut pending_tools, true);
-                        }
-                    }
-                    ApiStreamEvent::ContentBlockStart(start) => {
-                        push_output_block(
-                            start.content_block,
-                            start.index,
-                            &mut events,
-                            &mut pending_tools,
-                            true,
-                        );
-                    }
-                    ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
-                        ContentBlockDelta::TextDelta { text } => {
-                            if !text.is_empty() {
-                                events.push(AssistantEvent::TextDelta(text));
-                            }
-                        }
-                        ContentBlockDelta::InputJsonDelta { partial_json } => {
-                            if let Some((_, _, input)) = pending_tools.get_mut(&delta.index) {
-                                input.push_str(&partial_json);
-                            }
-                        }
-                        ContentBlockDelta::ThinkingDelta { .. }
-                        | ContentBlockDelta::SignatureDelta { .. } => {}
-                    },
-                    ApiStreamEvent::ContentBlockStop(stop) => {
-                        if let Some((id, name, input)) = pending_tools.remove(&stop.index) {
-                            events.push(AssistantEvent::ToolUse { id, name, input });
-                        }
-                    }
-                    ApiStreamEvent::MessageDelta(delta) => {
-                        events.push(AssistantEvent::Usage(TokenUsage {
-                            input_tokens: delta.usage.input_tokens,
-                            output_tokens: delta.usage.output_tokens,
-                            cache_creation_input_tokens: 0,
-                            cache_read_input_tokens: 0,
-                        }));
-                    }
-                    ApiStreamEvent::MessageStop(_) => {
-                        saw_stop = true;
-                        events.push(AssistantEvent::MessageStop);
-                    }
+            let attempt = runtime.block_on(stream_with_provider(&entry.client, &message_request));
+            match attempt {
+                Ok(events) => return Ok(events),
+                Err(error) if error.is_retryable() && index + 1 < chain.len() => {
+                    eprintln!(
+                        "provider {} failed with retryable error, falling back: {error}",
+                        entry.model
+                    );
+                    last_error = Some(error);
+                    continue;
+                }
+                Err(error) => return Err(RuntimeError::new(error.to_string())),
+            }
+        }
+
+        Err(RuntimeError::new(
+            last_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| String::from("provider chain exhausted with no attempts")),
+        ))
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn stream_with_provider(
+    client: &ProviderClient,
+    message_request: &MessageRequest,
+) -> Result<Vec<AssistantEvent>, ApiError> {
+    let mut stream = client.stream_message(message_request).await?;
+    let mut events = Vec::new();
+    let mut pending_tools: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
+    let mut saw_stop = false;
+
+    while let Some(event) = stream.next_event().await? {
+        match event {
+            ApiStreamEvent::MessageStart(start) => {
+                for block in start.message.content {
+                    push_output_block(block, 0, &mut events, &mut pending_tools, true);
                 }
             }
-
-            if !saw_stop
-                && events.iter().any(|event| {
-                    matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
-                        || matches!(event, AssistantEvent::ToolUse { .. })
-                })
-            {
+            ApiStreamEvent::ContentBlockStart(start) => {
+                push_output_block(
+                    start.content_block,
+                    start.index,
+                    &mut events,
+                    &mut pending_tools,
+                    true,
+                );
+            }
+            ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
+                ContentBlockDelta::TextDelta { text } => {
+                    if !text.is_empty() {
+                        events.push(AssistantEvent::TextDelta(text));
+                    }
+                }
+                ContentBlockDelta::InputJsonDelta { partial_json } => {
+                    if let Some((_, _, input)) = pending_tools.get_mut(&delta.index) {
+                        input.push_str(&partial_json);
+                    }
+                }
+                ContentBlockDelta::ThinkingDelta { .. }
+                | ContentBlockDelta::SignatureDelta { .. } => {}
+            },
+            ApiStreamEvent::ContentBlockStop(stop) => {
+                if let Some((id, name, input)) = pending_tools.remove(&stop.index) {
+                    events.push(AssistantEvent::ToolUse { id, name, input });
+                }
+            }
+            ApiStreamEvent::MessageDelta(delta) => {
+                events.push(AssistantEvent::Usage(delta.usage.token_usage()));
+            }
+            ApiStreamEvent::MessageStop(_) => {
+                saw_stop = true;
                 events.push(AssistantEvent::MessageStop);
             }
-
-            if events
-                .iter()
-                .any(|event| matches!(event, AssistantEvent::MessageStop))
-            {
-                return Ok(events);
-            }
-
-            let response = self
-                .client
-                .send_message(&MessageRequest {
-                    stream: false,
-                    ..message_request.clone()
-                })
-                .await
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
-            Ok(response_to_events(response))
-        })
+        }
     }
 
     push_prompt_cache_record(client, &mut events);
@@ -3946,14 +4022,30 @@ fn response_to_events(response: MessageResponse) -> Vec<AssistantEvent> {
         }
     }
 
-    events.push(AssistantEvent::Usage(TokenUsage {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
-        cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
-        cache_read_input_tokens: response.usage.cache_read_input_tokens,
-    }));
+    events.push(AssistantEvent::Usage(response.usage.token_usage()));
     events.push(AssistantEvent::MessageStop);
     events
+}
+
+fn push_prompt_cache_record(client: &ProviderClient, events: &mut Vec<AssistantEvent>) {
+    if let Some(record) = client.take_last_prompt_cache_record() {
+        if let Some(event) = prompt_cache_record_to_runtime_event(record) {
+            events.push(AssistantEvent::PromptCache(event));
+        }
+    }
+}
+
+fn prompt_cache_record_to_runtime_event(
+    record: api::PromptCacheRecord,
+) -> Option<PromptCacheEvent> {
+    let cache_break = record.cache_break?;
+    Some(PromptCacheEvent {
+        unexpected: cache_break.unexpected,
+        reason: cache_break.reason,
+        previous_cache_read_input_tokens: cache_break.previous_cache_read_input_tokens,
+        current_cache_read_input_tokens: cache_break.current_cache_read_input_tokens,
+        token_drop: cache_break.token_drop,
+    })
 }
 
 fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
@@ -4099,14 +4191,14 @@ fn canonical_tool_token(value: &str) -> String {
 }
 
 fn agent_store_dir() -> Result<std::path::PathBuf, String> {
-    if let Ok(path) = std::env::var("CLAW_AGENT_STORE") {
+    if let Ok(path) = std::env::var("CLAWD_AGENT_STORE") {
         return Ok(std::path::PathBuf::from(path));
     }
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     if let Some(workspace_root) = cwd.ancestors().nth(2) {
-        return Ok(workspace_root.join(".claw-agents"));
+        return Ok(workspace_root.join(".clawd-agents"));
     }
-    Ok(cwd.join(".claw-agents"))
+    Ok(cwd.join(".clawd-agents"))
 }
 
 fn make_agent_id() -> String {
@@ -4211,7 +4303,8 @@ fn execute_notebook_edit(input: NotebookEditInput) -> Result<NotebookEditOutput,
 
     let cell_id = match edit_mode {
         NotebookEditMode::Insert => {
-            let resolved_cell_type = resolved_cell_type.expect("insert cell type");
+            let resolved_cell_type = resolved_cell_type
+                .ok_or_else(|| String::from("insert mode requires a cell type"))?;
             let new_id = make_cell_id(cells.len());
             let new_cell = build_notebook_cell(&new_id, resolved_cell_type, &new_source);
             let insert_at = target_index.map_or(cells.len(), |index| index + 1);
@@ -4223,16 +4316,21 @@ fn execute_notebook_edit(input: NotebookEditInput) -> Result<NotebookEditOutput,
                 .map(ToString::to_string)
         }
         NotebookEditMode::Delete => {
-            let removed = cells.remove(target_index.expect("delete target index"));
+            let idx = target_index
+                .ok_or_else(|| String::from("delete mode requires a target cell index"))?;
+            let removed = cells.remove(idx);
             removed
                 .get("id")
                 .and_then(serde_json::Value::as_str)
                 .map(ToString::to_string)
         }
         NotebookEditMode::Replace => {
-            let resolved_cell_type = resolved_cell_type.expect("replace cell type");
+            let resolved_cell_type = resolved_cell_type
+                .ok_or_else(|| String::from("replace mode requires a cell type"))?;
+            let idx = target_index
+                .ok_or_else(|| String::from("replace mode requires a target cell index"))?;
             let cell = cells
-                .get_mut(target_index.expect("replace target index"))
+                .get_mut(idx)
                 .ok_or_else(|| String::from("Cell index out of range"))?;
             cell["source"] = serde_json::Value::Array(source_lines(&new_source));
             cell["cell_type"] = serde_json::Value::String(match resolved_cell_type {
@@ -4323,13 +4421,21 @@ fn cell_kind(cell: &serde_json::Value) -> Option<NotebookCellType> {
         })
 }
 
+const MAX_SLEEP_DURATION_MS: u64 = 300_000;
+
 #[allow(clippy::needless_pass_by_value)]
-fn execute_sleep(input: SleepInput) -> SleepOutput {
+fn execute_sleep(input: SleepInput) -> Result<SleepOutput, String> {
+    if input.duration_ms > MAX_SLEEP_DURATION_MS {
+        return Err(format!(
+            "duration_ms {} exceeds maximum allowed sleep of {MAX_SLEEP_DURATION_MS}ms",
+            input.duration_ms,
+        ));
+    }
     std::thread::sleep(Duration::from_millis(input.duration_ms));
-    SleepOutput {
+    Ok(SleepOutput {
         duration_ms: input.duration_ms,
         message: format!("Slept for {}ms", input.duration_ms),
-    }
+    })
 }
 
 fn execute_brief(input: BriefInput) -> Result<BriefOutput, String> {
@@ -4426,28 +4532,204 @@ fn execute_config(input: ConfigInput) -> Result<ConfigOutput, String> {
     }
 }
 
-fn execute_structured_output(input: StructuredOutputInput) -> StructuredOutputResult {
-    StructuredOutputResult {
+const PERMISSION_DEFAULT_MODE_PATH: &[&str] = &["permissions", "defaultMode"];
+
+fn execute_enter_plan_mode(_input: EnterPlanModeInput) -> Result<PlanModeOutput, String> {
+    let settings_path = config_file_for_scope(ConfigScope::Settings)?;
+    let state_path = plan_mode_state_file()?;
+    let mut document = read_json_object(&settings_path)?;
+    let current_local_mode = get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned();
+    let current_is_plan =
+        matches!(current_local_mode.as_ref(), Some(Value::String(value)) if value == "plan");
+
+    if let Some(state) = read_plan_mode_state(&state_path)? {
+        if current_is_plan {
+            return Ok(PlanModeOutput {
+                success: true,
+                operation: String::from("enter"),
+                changed: false,
+                active: true,
+                managed: true,
+                message: String::from("Plan mode override is already active for this worktree."),
+                settings_path: settings_path.display().to_string(),
+                state_path: state_path.display().to_string(),
+                previous_local_mode: state.previous_local_mode,
+                current_local_mode,
+            });
+        }
+        clear_plan_mode_state(&state_path)?;
+    }
+
+    if current_is_plan {
+        return Ok(PlanModeOutput {
+            success: true,
+            operation: String::from("enter"),
+            changed: false,
+            active: true,
+            managed: false,
+            message: String::from(
+                "Worktree-local plan mode is already enabled outside EnterPlanMode; leaving it unchanged.",
+            ),
+            settings_path: settings_path.display().to_string(),
+            state_path: state_path.display().to_string(),
+            previous_local_mode: None,
+            current_local_mode,
+        });
+    }
+
+    let state = PlanModeState {
+        had_local_override: current_local_mode.is_some(),
+        previous_local_mode: current_local_mode.clone(),
+    };
+    write_plan_mode_state(&state_path, &state)?;
+    set_nested_value(
+        &mut document,
+        PERMISSION_DEFAULT_MODE_PATH,
+        Value::String(String::from("plan")),
+    );
+    write_json_object(&settings_path, &document)?;
+
+    Ok(PlanModeOutput {
+        success: true,
+        operation: String::from("enter"),
+        changed: true,
+        active: true,
+        managed: true,
+        message: String::from("Enabled worktree-local plan mode override."),
+        settings_path: settings_path.display().to_string(),
+        state_path: state_path.display().to_string(),
+        previous_local_mode: state.previous_local_mode,
+        current_local_mode: get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned(),
+    })
+}
+
+fn execute_exit_plan_mode(_input: ExitPlanModeInput) -> Result<PlanModeOutput, String> {
+    let settings_path = config_file_for_scope(ConfigScope::Settings)?;
+    let state_path = plan_mode_state_file()?;
+    let mut document = read_json_object(&settings_path)?;
+    let current_local_mode = get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned();
+    let current_is_plan =
+        matches!(current_local_mode.as_ref(), Some(Value::String(value)) if value == "plan");
+
+    let Some(state) = read_plan_mode_state(&state_path)? else {
+        return Ok(PlanModeOutput {
+            success: true,
+            operation: String::from("exit"),
+            changed: false,
+            active: current_is_plan,
+            managed: false,
+            message: String::from("No EnterPlanMode override is active for this worktree."),
+            settings_path: settings_path.display().to_string(),
+            state_path: state_path.display().to_string(),
+            previous_local_mode: None,
+            current_local_mode,
+        });
+    };
+
+    if !current_is_plan {
+        clear_plan_mode_state(&state_path)?;
+        return Ok(PlanModeOutput {
+            success: true,
+            operation: String::from("exit"),
+            changed: false,
+            active: false,
+            managed: false,
+            message: String::from(
+                "Cleared stale EnterPlanMode state because plan mode was already changed outside the tool.",
+            ),
+            settings_path: settings_path.display().to_string(),
+            state_path: state_path.display().to_string(),
+            previous_local_mode: state.previous_local_mode,
+            current_local_mode,
+        });
+    }
+
+    if state.had_local_override {
+        if let Some(previous_local_mode) = state.previous_local_mode.clone() {
+            set_nested_value(
+                &mut document,
+                PERMISSION_DEFAULT_MODE_PATH,
+                previous_local_mode,
+            );
+        } else {
+            remove_nested_value(&mut document, PERMISSION_DEFAULT_MODE_PATH);
+        }
+    } else {
+        remove_nested_value(&mut document, PERMISSION_DEFAULT_MODE_PATH);
+    }
+    write_json_object(&settings_path, &document)?;
+    clear_plan_mode_state(&state_path)?;
+
+    Ok(PlanModeOutput {
+        success: true,
+        operation: String::from("exit"),
+        changed: true,
+        active: false,
+        managed: false,
+        message: String::from("Restored the prior worktree-local plan mode setting."),
+        settings_path: settings_path.display().to_string(),
+        state_path: state_path.display().to_string(),
+        previous_local_mode: state.previous_local_mode,
+        current_local_mode: get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned(),
+    })
+}
+
+fn execute_structured_output(
+    input: StructuredOutputInput,
+) -> Result<StructuredOutputResult, String> {
+    if input.0.is_empty() {
+        return Err(String::from("structured output payload must not be empty"));
+    }
+    Ok(StructuredOutputResult {
         data: String::from("Structured output provided successfully"),
         structured_output: input.0,
-    }
+    })
 }
 
 fn execute_repl(input: ReplInput) -> Result<ReplOutput, String> {
     if input.code.trim().is_empty() {
         return Err(String::from("code must not be empty"));
     }
-    let _ = input.timeout_ms;
     let runtime = resolve_repl_runtime(&input.language)?;
     let started = Instant::now();
-    let mut process = Command::new("sh");
-    let shell_args = if std::env::var("CI").is_ok() { "-c" } else { "-lc" };
-    process.arg(shell_args);
-    
-    let full_command = format!("{} {} '{}'", runtime.program, runtime.args.join(" "), input.code.replace("'", "'\\''"));
-    process.arg(full_command);
-    
-    let output = process.output().map_err(|error| error.to_string())?;
+    let mut process = Command::new(runtime.program);
+    process
+        .args(runtime.args)
+        .arg(&input.code)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let output = if let Some(timeout_ms) = input.timeout_ms {
+        let mut child = process.spawn().map_err(|error| error.to_string())?;
+        loop {
+            if child
+                .try_wait()
+                .map_err(|error| error.to_string())?
+                .is_some()
+            {
+                break child
+                    .wait_with_output()
+                    .map_err(|error| error.to_string())?;
+            }
+            if started.elapsed() >= Duration::from_millis(timeout_ms) {
+                child.kill().map_err(|error| error.to_string())?;
+                child
+                    .wait_with_output()
+                    .map_err(|error| error.to_string())?;
+                return Err(format!(
+                    "REPL execution exceeded timeout of {timeout_ms} ms"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    } else {
+        process
+            .spawn()
+            .map_err(|error| error.to_string())?
+            .wait_with_output()
+            .map_err(|error| error.to_string())?
+    };
 
     Ok(ReplOutput {
         language: input.language,
@@ -4478,7 +4760,7 @@ fn resolve_repl_runtime(language: &str) -> Result<ReplRuntime, String> {
         "sh" | "shell" | "bash" => Ok(ReplRuntime {
             program: detect_first_command(&["bash", "sh"])
                 .ok_or_else(|| String::from("shell runtime not found"))?,
-            args: if std::env::var("CI").is_ok() { &["-c"] } else { &["-lc"] },
+            args: &["-lc"],
         }),
         other => Err(format!("unsupported REPL language: {other}")),
     }
@@ -4827,7 +5109,7 @@ fn detect_powershell_shell() -> std::io::Result<&'static str> {
 
 fn command_exists(command: &str) -> bool {
     std::process::Command::new("sh")
-        .arg("-c")
+        .arg(if std::env::var("CI").is_ok() { "-c" } else { "-lc" })
         .arg(format!("command -v {command} >/dev/null 2>&1"))
         .status()
         .map(|status| status.success())
@@ -5039,9 +5321,12 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        agent_permission_policy, allowed_tools_for_subagent, execute_agent_with_spawn,
-        execute_tool, final_assistant_text, mvp_tool_specs, persist_agent_terminal_state,
-        push_output_block, AgentInput, AgentJob, SubagentToolExecutor,
+        agent_permission_policy, allowed_tools_for_subagent, classify_lane_failure,
+        derive_agent_state, execute_agent_with_spawn, execute_tool, final_assistant_text,
+        maybe_commit_provenance, mvp_tool_specs, permission_mode_from_plugin,
+        persist_agent_terminal_state, push_output_block, run_task_packet, AgentInput, AgentJob,
+        GlobalToolRegistry, LaneEventName, LaneFailureClass, ProviderRuntimeClient,
+        SubagentToolExecutor,
     };
     use runtime::ProviderFallbackConfig;
     use api::OutputContentBlock;
@@ -5061,7 +5346,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        std::env::temp_dir().join(format!("claw-tools-{unique}-{name}"))
+        std::env::temp_dir().join(format!("clawd-tools-{unique}-{name}"))
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {
@@ -5134,6 +5419,280 @@ mod tests {
     fn rejects_unknown_tool_names() {
         let error = execute_tool("nope", &json!({})).expect_err("tool should be rejected");
         assert!(error.contains("unsupported tool"));
+    }
+
+    #[test]
+    fn worker_tools_gate_prompt_delivery_until_ready_and_support_auto_trust() {
+        let created = execute_tool(
+            "WorkerCreate",
+            &json!({
+                "cwd": "/tmp/worktree/repo",
+                "trusted_roots": ["/tmp/worktree"]
+            }),
+        )
+        .expect("WorkerCreate should succeed");
+        let created_output: serde_json::Value = serde_json::from_str(&created).expect("json");
+        let worker_id = created_output["worker_id"]
+            .as_str()
+            .expect("worker id")
+            .to_string();
+        assert_eq!(created_output["status"], "spawning");
+        assert_eq!(created_output["trust_auto_resolve"], true);
+
+        let gated = execute_tool(
+            "WorkerSendPrompt",
+            &json!({
+                "worker_id": worker_id,
+                "prompt": "ship the change"
+            }),
+        )
+        .expect_err("prompt delivery before ready should fail");
+        assert!(gated.contains("not ready for prompt delivery"));
+
+        let observed = execute_tool(
+            "WorkerObserve",
+            &json!({
+                "worker_id": created_output["worker_id"],
+                "screen_text": "Do you trust the files in this folder?\n1. Yes, proceed\n2. No"
+            }),
+        )
+        .expect("WorkerObserve should auto-resolve trust");
+        let observed_output: serde_json::Value = serde_json::from_str(&observed).expect("json");
+        assert_eq!(observed_output["status"], "spawning");
+        assert_eq!(observed_output["trust_gate_cleared"], true);
+        assert_eq!(
+            observed_output["events"][1]["payload"]["type"],
+            "trust_prompt"
+        );
+        assert_eq!(
+            observed_output["events"][2]["payload"]["resolution"],
+            "auto_allowlisted"
+        );
+
+        let ready = execute_tool(
+            "WorkerObserve",
+            &json!({
+                "worker_id": created_output["worker_id"],
+                "screen_text": "Ready for your input\n>"
+            }),
+        )
+        .expect("WorkerObserve should mark worker ready");
+        let ready_output: serde_json::Value = serde_json::from_str(&ready).expect("json");
+        assert_eq!(ready_output["status"], "ready_for_prompt");
+
+        let await_ready = execute_tool(
+            "WorkerAwaitReady",
+            &json!({
+                "worker_id": created_output["worker_id"]
+            }),
+        )
+        .expect("WorkerAwaitReady should succeed");
+        let await_ready_output: serde_json::Value =
+            serde_json::from_str(&await_ready).expect("json");
+        assert_eq!(await_ready_output["ready"], true);
+
+        let accepted = execute_tool(
+            "WorkerSendPrompt",
+            &json!({
+                "worker_id": created_output["worker_id"],
+                "prompt": "ship the change"
+            }),
+        )
+        .expect("WorkerSendPrompt should succeed after ready");
+        let accepted_output: serde_json::Value = serde_json::from_str(&accepted).expect("json");
+        assert_eq!(accepted_output["status"], "running");
+        assert_eq!(accepted_output["prompt_delivery_attempts"], 1);
+        assert_eq!(accepted_output["prompt_in_flight"], true);
+    }
+
+    #[test]
+    fn worker_tools_detect_misdelivery_and_arm_prompt_replay() {
+        let created = execute_tool(
+            "WorkerCreate",
+            &json!({
+                "cwd": "/tmp/repo/worker-misdelivery"
+            }),
+        )
+        .expect("WorkerCreate should succeed");
+        let created_output: serde_json::Value = serde_json::from_str(&created).expect("json");
+        let worker_id = created_output["worker_id"]
+            .as_str()
+            .expect("worker id")
+            .to_string();
+
+        execute_tool(
+            "WorkerObserve",
+            &json!({
+                "worker_id": worker_id,
+                "screen_text": "Ready for input\n>"
+            }),
+        )
+        .expect("worker should become ready");
+
+        execute_tool(
+            "WorkerSendPrompt",
+            &json!({
+                "worker_id": worker_id,
+                "prompt": "Investigate flaky boot"
+            }),
+        )
+        .expect("prompt send should succeed");
+
+        let recovered = execute_tool(
+            "WorkerObserve",
+            &json!({
+                "worker_id": worker_id,
+                "screen_text": "% Investigate flaky boot\nzsh: command not found: Investigate"
+            }),
+        )
+        .expect("misdelivery observe should succeed");
+        let recovered_output: serde_json::Value = serde_json::from_str(&recovered).expect("json");
+        assert_eq!(recovered_output["status"], "ready_for_prompt");
+        assert_eq!(recovered_output["last_error"]["kind"], "prompt_delivery");
+        assert_eq!(recovered_output["replay_prompt"], "Investigate flaky boot");
+        assert_eq!(
+            recovered_output["events"][3]["payload"]["observed_target"],
+            "shell"
+        );
+        assert_eq!(
+            recovered_output["events"][4]["payload"]["recovery_armed"],
+            true
+        );
+
+        let replayed = execute_tool(
+            "WorkerSendPrompt",
+            &json!({
+                "worker_id": worker_id
+            }),
+        )
+        .expect("WorkerSendPrompt should replay recovered prompt");
+        let replayed_output: serde_json::Value = serde_json::from_str(&replayed).expect("json");
+        assert_eq!(replayed_output["status"], "running");
+        assert_eq!(replayed_output["prompt_delivery_attempts"], 2);
+        assert_eq!(replayed_output["prompt_in_flight"], true);
+    }
+
+    #[test]
+    fn global_tool_registry_denies_blocked_tool_before_dispatch() {
+        // given
+        let policy = permission_policy_for_mode(PermissionMode::ReadOnly);
+        let registry = GlobalToolRegistry::builtin().with_enforcer(PermissionEnforcer::new(policy));
+
+        // when
+        let error = registry
+            .execute(
+                "write_file",
+                &json!({
+                    "path": "blocked.txt",
+                    "content": "blocked"
+                }),
+            )
+            .expect_err("write tool should be denied before dispatch");
+
+        // then
+        assert!(error.contains("requires workspace-write permission"));
+    }
+
+    #[test]
+    fn subagent_tool_executor_denies_blocked_tool_before_dispatch() {
+        // given
+        let policy = permission_policy_for_mode(PermissionMode::ReadOnly);
+        let mut executor = SubagentToolExecutor::new(BTreeSet::from([String::from("write_file")]))
+            .with_enforcer(PermissionEnforcer::new(policy));
+
+        // when
+        let error = executor
+            .execute(
+                "write_file",
+                &json!({
+                    "path": "blocked.txt",
+                    "content": "blocked"
+                })
+                .to_string(),
+            )
+            .expect_err("subagent write tool should be denied before dispatch");
+
+        // then
+        assert!(error
+            .to_string()
+            .contains("requires workspace-write permission"));
+    }
+
+    #[test]
+    fn permission_mode_from_plugin_rejects_invalid_inputs() {
+        let unknown_permission = permission_mode_from_plugin("admin")
+            .expect_err("unknown plugin permission should fail");
+        assert!(unknown_permission.contains("unsupported plugin permission: admin"));
+
+        let empty_permission =
+            permission_mode_from_plugin("").expect_err("empty plugin permission should fail");
+        assert!(empty_permission.contains("unsupported plugin permission: "));
+    }
+
+    #[test]
+    fn runtime_tools_extend_registry_definitions_permissions_and_search() {
+        let registry = GlobalToolRegistry::builtin()
+            .with_runtime_tools(vec![super::RuntimeToolDefinition {
+                name: "mcp__demo__echo".to_string(),
+                description: Some("Echo text from the demo MCP server".to_string()),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "text": { "type": "string" } },
+                    "additionalProperties": false
+                }),
+                required_permission: runtime::PermissionMode::ReadOnly,
+            }])
+            .expect("runtime tools should register");
+
+        let allowed = registry
+            .normalize_allowed_tools(&["mcp__demo__echo".to_string()])
+            .expect("runtime tool should be allow-listable")
+            .expect("allow-list should be populated");
+        assert!(allowed.contains("mcp__demo__echo"));
+
+        let definitions = registry.definitions(Some(&allowed));
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].name, "mcp__demo__echo");
+
+        let permissions = registry
+            .permission_specs(Some(&allowed))
+            .expect("runtime tool permissions should resolve");
+        assert_eq!(
+            permissions,
+            vec![(
+                "mcp__demo__echo".to_string(),
+                runtime::PermissionMode::ReadOnly
+            )]
+        );
+
+        let search = registry.search(
+            "demo echo",
+            5,
+            Some(vec!["pending-server".to_string()]),
+            Some(runtime::McpDegradedReport::new(
+                vec!["demo".to_string()],
+                vec![runtime::McpFailedServer {
+                    server_name: "pending-server".to_string(),
+                    phase: runtime::McpLifecyclePhase::ToolDiscovery,
+                    error: runtime::McpErrorSurface::new(
+                        runtime::McpLifecyclePhase::ToolDiscovery,
+                        Some("pending-server".to_string()),
+                        "tool discovery failed",
+                        BTreeMap::new(),
+                        true,
+                    ),
+                }],
+                vec!["mcp__demo__echo".to_string()],
+                vec!["mcp__demo__echo".to_string()],
+            )),
+        );
+        let output = serde_json::to_value(search).expect("search output should serialize");
+        assert_eq!(output["matches"][0], "mcp__demo__echo");
+        assert_eq!(output["pending_mcp_servers"][0], "pending-server");
+        assert_eq!(
+            output["mcp_degraded"]["failed_servers"][0]["phase"],
+            "tool_discovery"
+        );
     }
 
     #[test]
@@ -5212,9 +5771,6 @@ mod tests {
 
     #[test]
     fn web_search_extracts_and_filters_results() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let server = TestServer::spawn(Arc::new(|request_line: &str| {
             assert!(request_line.contains("GET /search?q=rust+web+search "));
             HttpResponse::html(
@@ -5230,7 +5786,7 @@ mod tests {
         }));
 
         std::env::set_var(
-            "CLAW_WEB_SEARCH_BASE_URL",
+            "CLAWD_WEB_SEARCH_BASE_URL",
             format!("http://{}/search", server.addr()),
         );
         let result = execute_tool(
@@ -5242,7 +5798,7 @@ mod tests {
             }),
         )
         .expect("WebSearch should succeed");
-        std::env::remove_var("CLAW_WEB_SEARCH_BASE_URL");
+        std::env::remove_var("CLAWD_WEB_SEARCH_BASE_URL");
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(output["query"], "rust web search");
@@ -5278,7 +5834,7 @@ mod tests {
         }));
 
         std::env::set_var(
-            "CLAW_WEB_SEARCH_BASE_URL",
+            "CLAWD_WEB_SEARCH_BASE_URL",
             format!("http://{}/fallback", server.addr()),
         );
         let result = execute_tool(
@@ -5288,7 +5844,7 @@ mod tests {
             }),
         )
         .expect("WebSearch fallback parsing should succeed");
-        std::env::remove_var("CLAW_WEB_SEARCH_BASE_URL");
+        std::env::remove_var("CLAWD_WEB_SEARCH_BASE_URL");
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         let results = output["results"].as_array().expect("results array");
@@ -5301,10 +5857,10 @@ mod tests {
         assert_eq!(content[0]["url"], "https://example.com/one");
         assert_eq!(content[1]["url"], "https://docs.rs/tokio");
 
-        std::env::set_var("CLAW_WEB_SEARCH_BASE_URL", "://bad-base-url");
+        std::env::set_var("CLAWD_WEB_SEARCH_BASE_URL", "://bad-base-url");
         let error = execute_tool("WebSearch", &json!({ "query": "generic links" }))
             .expect_err("invalid base URL should fail");
-        std::env::remove_var("CLAW_WEB_SEARCH_BASE_URL");
+        std::env::remove_var("CLAWD_WEB_SEARCH_BASE_URL");
         assert!(error.contains("relative URL without a base") || error.contains("empty host"));
     }
 
@@ -5371,7 +5927,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = temp_path("todos.json");
-        std::env::set_var("CLAW_TODO_STORE", &path);
+        std::env::set_var("CLAWD_TODO_STORE", &path);
 
         let first = execute_tool(
             "TodoWrite",
@@ -5397,7 +5953,7 @@ mod tests {
             }),
         )
         .expect("TodoWrite should succeed");
-        std::env::remove_var("CLAW_TODO_STORE");
+        std::env::remove_var("CLAWD_TODO_STORE");
         let _ = std::fs::remove_file(path);
 
         let second_output: serde_json::Value = serde_json::from_str(&second).expect("valid json");
@@ -5418,7 +5974,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = temp_path("todos-errors.json");
-        std::env::set_var("CLAW_TODO_STORE", &path);
+        std::env::set_var("CLAWD_TODO_STORE", &path);
 
         let empty = execute_tool("TodoWrite", &json!({ "todos": [] }))
             .expect_err("empty todos should fail");
@@ -5458,7 +6014,7 @@ mod tests {
             }),
         )
         .expect("completed todos should succeed");
-        std::env::remove_var("CLAW_TODO_STORE");
+        std::env::remove_var("CLAWD_TODO_STORE");
         let _ = fs::remove_file(path);
 
         let output: serde_json::Value = serde_json::from_str(&nudge).expect("valid json");
@@ -5467,16 +6023,17 @@ mod tests {
 
     #[test]
     fn skill_loads_local_skill_prompt() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-            
-        // Create a temporary skill directory
-        let temp_dir = std::env::temp_dir().join(format!("claw-test-skills-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let help_dir = temp_dir.join("skills").join("help");
-        std::fs::create_dir_all(&help_dir).expect("create help skill dir");
-        std::fs::write(help_dir.join("SKILL.md"), "Guide on using oh-my-codex plugin").expect("write skill");
-        std::env::set_var("CODEX_HOME", &temp_dir);
+        let _guard = env_lock().lock().expect("env lock should acquire");
+        let home = temp_path("skills-home");
+        let skill_dir = home.join(".agents").join("skills").join("help");
+        fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "# help\n\nGuide on using oh-my-codex plugin\n",
+        )
+        .expect("skill file should exist");
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home);
 
         let result = execute_tool(
             "Skill",
@@ -5492,7 +6049,7 @@ mod tests {
         assert!(output["path"]
             .as_str()
             .expect("path")
-            .ends_with("SKILL.md"));
+            .ends_with("/help/SKILL.md"));
         assert!(output["prompt"]
             .as_str()
             .expect("prompt")
@@ -5511,10 +6068,14 @@ mod tests {
         assert!(dollar_output["path"]
             .as_str()
             .expect("path")
-            .ends_with("SKILL.md"));
-            
-        std::env::remove_var("CODEX_HOME");
-        let _ = std::fs::remove_dir_all(temp_dir);
+            .ends_with("/help/SKILL.md"));
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        fs::remove_dir_all(home).expect("temp home should clean up");
     }
 
     #[test]
@@ -5899,7 +6460,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = temp_path("agent-store");
-        std::env::set_var("CLAW_AGENT_STORE", &dir);
+        std::env::set_var("CLAWD_AGENT_STORE", &dir);
         let captured = Arc::new(Mutex::new(None::<AgentJob>));
         let captured_for_spawn = Arc::clone(&captured);
 
@@ -5919,7 +6480,7 @@ mod tests {
             },
         )
         .expect("Agent should succeed");
-        std::env::remove_var("CLAW_AGENT_STORE");
+        std::env::remove_var("CLAWD_AGENT_STORE");
 
         assert_eq!(manifest.name, "ship-audit");
         assert_eq!(manifest.subagent_type.as_deref(), Some("Explore"));
@@ -5982,7 +6543,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = temp_path("agent-runner");
-        std::env::set_var("CLAW_AGENT_STORE", &dir);
+        std::env::set_var("CLAWD_AGENT_STORE", &dir);
 
         let completed = execute_agent_with_spawn(
             AgentInput {
@@ -6114,7 +6675,7 @@ mod tests {
         );
         assert_eq!(spawn_error_manifest_json["derivedState"], "truly_idle");
 
-        std::env::remove_var("CLAW_AGENT_STORE");
+        std::env::remove_var("CLAWD_AGENT_STORE");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -6481,9 +7042,6 @@ mod tests {
 
     #[test]
     fn bash_tool_reports_success_exit_failure_timeout_and_background() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let success = execute_tool("bash", &json!({ "command": "printf 'hello'" }))
             .expect("bash should succeed");
         let success_output: serde_json::Value = serde_json::from_str(&success).expect("json");
@@ -6802,9 +7360,24 @@ mod tests {
     }
 
     #[test]
+    fn given_excessive_duration_when_sleep_then_rejects_with_error() {
+        let result = execute_tool("Sleep", &json!({"duration_ms": 999_999_999_u64}));
+        let error = result.expect_err("excessive sleep should fail");
+        assert!(error.contains("exceeds maximum allowed sleep"));
+    }
+
+    #[test]
+    fn given_zero_duration_when_sleep_then_succeeds() {
+        let result =
+            execute_tool("Sleep", &json!({"duration_ms": 0})).expect("0ms sleep should succeed");
+        let output: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(output["duration_ms"], 0);
+    }
+
+    #[test]
     fn brief_returns_sent_message_and_attachment_metadata() {
         let attachment = std::env::temp_dir().join(format!(
-            "claw-brief-{}.png",
+            "clawd-brief-{}.png",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time")
@@ -6835,7 +7408,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = std::env::temp_dir().join(format!(
-            "claw-config-{}",
+            "clawd-config-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time")
@@ -7040,10 +7613,14 @@ mod tests {
     }
 
     #[test]
+    fn given_empty_payload_when_structured_output_then_rejects_with_error() {
+        let result = execute_tool("StructuredOutput", &json!({}));
+        let error = result.expect_err("empty payload should fail");
+        assert!(error.contains("must not be empty"));
+    }
+
+    #[test]
     fn repl_executes_python_code() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = execute_tool(
             "REPL",
             &json!({"language": "python", "code": "print(1 + 1)", "timeout_ms": 500}),
@@ -7056,12 +7633,43 @@ mod tests {
     }
 
     #[test]
+    fn given_empty_code_when_repl_then_rejects_with_error() {
+        let result = execute_tool("REPL", &json!({"language": "python", "code": "   "}));
+
+        let error = result.expect_err("empty REPL code should fail");
+        assert!(error.contains("code must not be empty"));
+    }
+
+    #[test]
+    fn given_unsupported_language_when_repl_then_rejects_with_error() {
+        let result = execute_tool("REPL", &json!({"language": "ruby", "code": "puts 1"}));
+
+        let error = result.expect_err("unsupported REPL language should fail");
+        assert!(error.contains("unsupported REPL language: ruby"));
+    }
+
+    #[test]
+    fn given_timeout_ms_when_repl_blocks_then_returns_timeout_error() {
+        let result = execute_tool(
+            "REPL",
+            &json!({
+                "language": "python",
+                "code": "import time\ntime.sleep(1)",
+                "timeout_ms": 10
+            }),
+        );
+
+        let error = result.expect_err("timed out REPL execution should fail");
+        assert!(error.contains("REPL execution exceeded timeout of 10 ms"));
+    }
+
+    #[test]
     fn powershell_runs_via_stub_shell() {
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = std::env::temp_dir().join(format!(
-            "claw-pwsh-bin-{}",
+            "clawd-pwsh-bin-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time")
@@ -7118,7 +7726,7 @@ printf 'pwsh:%s' "$1"
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let original_path = std::env::var("PATH").unwrap_or_default();
         let empty_dir = std::env::temp_dir().join(format!(
-            "claw-empty-bin-{}",
+            "clawd-empty-bin-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time")
