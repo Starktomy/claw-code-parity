@@ -92,6 +92,7 @@ impl PartialEq for Session {
 
 impl Eq for Session {}
 
+/// Errors raised while loading, parsing, or saving sessions.
 #[derive(Debug)]
 pub enum SessionError {
     Io(std::io::Error),

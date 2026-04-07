@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use identity::Capability;
 
+/// Permission level assigned to a tool invocation or runtime session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PermissionMode {
     ReadOnly,
@@ -31,22 +32,26 @@ pub struct PermissionRequest {
     pub required_mode: PermissionMode,
 }
 
+/// User-facing decision returned by a [`PermissionPrompter`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionPromptDecision {
     Allow,
     Deny { reason: String },
 }
 
+/// Prompting interface used when policy requires interactive approval.
 pub trait PermissionPrompter {
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision;
 }
 
+/// Final authorization result after evaluating static rules and prompts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionOutcome {
     Allow,
     Deny { reason: String },
 }
 
+/// Evaluates permission mode requirements plus allow/deny/ask rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionPolicy {
     active_mode: PermissionMode,

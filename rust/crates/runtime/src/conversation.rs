@@ -16,6 +16,7 @@ pub struct ApiRequest {
     pub messages: Vec<ConversationMessage>,
 }
 
+/// Streamed events emitted while processing a single assistant turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssistantEvent {
     TextDelta(String),
@@ -32,10 +33,12 @@ pub trait ApiClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError>;
 }
 
+/// Trait implemented by tool dispatchers that execute model-requested tools.
 pub trait ToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
 }
 
+/// Error returned when a tool invocation fails locally.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolError {
     message: String,
@@ -58,6 +61,7 @@ impl Display for ToolError {
 
 impl std::error::Error for ToolError {}
 
+/// Error returned when a conversation turn cannot be completed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeError {
     message: String,
@@ -80,6 +84,7 @@ impl Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
+/// Summary of one completed runtime turn, including tool results and usage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnSummary {
     pub assistant_messages: Vec<ConversationMessage>,
@@ -88,6 +93,7 @@ pub struct TurnSummary {
     pub usage: TokenUsage,
 }
 
+/// Coordinates the model loop, tool execution, hooks, and session updates.
 pub struct ConversationRuntime<C, T> {
     session: Session,
     api_client: C,
@@ -372,6 +378,7 @@ fn merge_hook_feedback(messages: &[String], output: String, denied: bool) -> Str
 
 type ToolHandler = Box<dyn FnMut(&str) -> Result<String, ToolError>>;
 
+/// Simple in-memory tool executor for tests and lightweight integrations.
 #[derive(Default)]
 pub struct StaticToolExecutor {
     handlers: BTreeMap<String, ToolHandler>,
@@ -465,7 +472,7 @@ mod tests {
                         AssistantEvent::MessageStop,
                     ])
                 }
-                _ => Err(RuntimeError::new("unexpected extra API call")),
+                _ => unreachable!("extra API call"),
             }
         }
     }
@@ -496,6 +503,7 @@ mod tests {
                 current_date: "2026-03-31".to_string(),
                 git_status: None,
                 git_diff: None,
+                git_recent_commits: None,
                 instruction_files: Vec::new(),
             })
             .with_os("linux", "6.8")
@@ -673,7 +681,7 @@ mod tests {
                             AssistantEvent::MessageStop,
                         ])
                     }
-                    _ => Err(RuntimeError::new("unexpected extra API call")),
+                    _ => unreachable!("extra API call"),
                 }
             }
         }

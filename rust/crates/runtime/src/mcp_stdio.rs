@@ -11,6 +11,9 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use crate::config::{McpTransport, RuntimeConfig, ScopedMcpServerConfig};
 use crate::mcp::mcp_tool_name;
 use crate::mcp_client::{McpClientBootstrap, McpClientTransport, McpStdioTransport};
+use crate::mcp_lifecycle_hardened::{
+    McpDegradedReport, McpErrorSurface, McpFailedServer, McpLifecyclePhase,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
@@ -217,6 +220,23 @@ pub struct UnsupportedMcpServer {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpDiscoveryFailure {
+    pub server_name: String,
+    pub phase: McpLifecyclePhase,
+    pub error: String,
+    pub recoverable: bool,
+    pub context: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpToolDiscoveryReport {
+    pub tools: Vec<ManagedMcpTool>,
+    pub failed_servers: Vec<McpDiscoveryFailure>,
+    pub unsupported_servers: Vec<UnsupportedMcpServer>,
+    pub degraded_startup: Option<McpDegradedReport>,
+}
+
 #[derive(Debug)]
 pub enum McpServerManagerError {
     Io(io::Error),
@@ -282,6 +302,113 @@ impl std::error::Error for McpServerManagerError {
 impl From<io::Error> for McpServerManagerError {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
+    }
+}
+
+impl McpServerManagerError {
+    fn lifecycle_phase(&self) -> McpLifecyclePhase {
+        match self {
+            Self::Io(_) => McpLifecyclePhase::SpawnConnect,
+            Self::Transport { method, .. }
+            | Self::JsonRpc { method, .. }
+            | Self::InvalidResponse { method, .. }
+            | Self::Timeout { method, .. } => lifecycle_phase_for_method(method),
+            Self::UnknownTool { .. } => McpLifecyclePhase::ToolDiscovery,
+            Self::UnknownServer { .. } => McpLifecyclePhase::ServerRegistration,
+        }
+    }
+
+    fn recoverable(&self) -> bool {
+        !matches!(
+            self.lifecycle_phase(),
+            McpLifecyclePhase::InitializeHandshake
+        ) && matches!(self, Self::Transport { .. } | Self::Timeout { .. })
+    }
+
+    fn discovery_failure(&self, server_name: &str) -> McpDiscoveryFailure {
+        let phase = self.lifecycle_phase();
+        let recoverable = self.recoverable();
+        let context = self.error_context();
+
+        McpDiscoveryFailure {
+            server_name: server_name.to_string(),
+            phase,
+            error: self.to_string(),
+            recoverable,
+            context,
+        }
+    }
+
+    fn error_context(&self) -> BTreeMap<String, String> {
+        match self {
+            Self::Io(error) => BTreeMap::from([("kind".to_string(), error.kind().to_string())]),
+            Self::Transport {
+                server_name,
+                method,
+                source,
+            } => BTreeMap::from([
+                ("server".to_string(), server_name.clone()),
+                ("method".to_string(), (*method).to_string()),
+                ("io_kind".to_string(), source.kind().to_string()),
+            ]),
+            Self::JsonRpc {
+                server_name,
+                method,
+                error,
+            } => BTreeMap::from([
+                ("server".to_string(), server_name.clone()),
+                ("method".to_string(), (*method).to_string()),
+                ("jsonrpc_code".to_string(), error.code.to_string()),
+            ]),
+            Self::InvalidResponse {
+                server_name,
+                method,
+                details,
+            } => BTreeMap::from([
+                ("server".to_string(), server_name.clone()),
+                ("method".to_string(), (*method).to_string()),
+                ("details".to_string(), details.clone()),
+            ]),
+            Self::Timeout {
+                server_name,
+                method,
+                timeout_ms,
+            } => BTreeMap::from([
+                ("server".to_string(), server_name.clone()),
+                ("method".to_string(), (*method).to_string()),
+                ("timeout_ms".to_string(), timeout_ms.to_string()),
+            ]),
+            Self::UnknownTool { qualified_name } => {
+                BTreeMap::from([("qualified_tool".to_string(), qualified_name.clone())])
+            }
+            Self::UnknownServer { server_name } => {
+                BTreeMap::from([("server".to_string(), server_name.clone())])
+            }
+        }
+    }
+}
+
+fn lifecycle_phase_for_method(method: &str) -> McpLifecyclePhase {
+    match method {
+        "initialize" => McpLifecyclePhase::InitializeHandshake,
+        "tools/list" => McpLifecyclePhase::ToolDiscovery,
+        "resources/list" => McpLifecyclePhase::ResourceDiscovery,
+        "resources/read" | "tools/call" => McpLifecyclePhase::Invocation,
+        _ => McpLifecyclePhase::ErrorSurfacing,
+    }
+}
+
+fn unsupported_server_failed_server(server: &UnsupportedMcpServer) -> McpFailedServer {
+    McpFailedServer {
+        server_name: server.server_name.clone(),
+        phase: McpLifecyclePhase::ServerRegistration,
+        error: McpErrorSurface::new(
+            McpLifecyclePhase::ServerRegistration,
+            Some(server.server_name.clone()),
+            server.reason.clone(),
+            BTreeMap::from([("transport".to_string(), format!("{:?}", server.transport))]),
+            false,
+        ),
     }
 }
 
@@ -354,6 +481,11 @@ impl McpServerManager {
     #[must_use]
     pub fn unsupported_servers(&self) -> &[UnsupportedMcpServer] {
         &self.unsupported_servers
+    }
+
+    #[must_use]
+    pub fn server_names(&self) -> Vec<String> {
+        self.servers.keys().cloned().collect()
     }
 
     pub async fn discover_tools(&mut self) -> Result<Vec<ManagedMcpTool>, McpServerManagerError> {
@@ -430,6 +562,75 @@ impl McpServerManager {
         Ok(discovered_tools)
     }
 
+    pub async fn discover_tools_best_effort(&mut self) -> McpToolDiscoveryReport {
+        let server_names = self.server_names();
+        let mut discovered_tools = Vec::new();
+        let mut working_servers = Vec::new();
+        let mut failed_servers = Vec::new();
+
+        for server_name in server_names {
+            match self.discover_tools_for_server(&server_name).await {
+                Ok(server_tools) => {
+                    working_servers.push(server_name.clone());
+                    self.clear_routes_for_server(&server_name);
+                    for tool in server_tools {
+                        self.tool_index.insert(
+                            tool.qualified_name.clone(),
+                            ToolRoute {
+                                server_name: tool.server_name.clone(),
+                                raw_name: tool.raw_name.clone(),
+                            },
+                        );
+                        discovered_tools.push(tool);
+                    }
+                }
+                Err(error) => {
+                    self.clear_routes_for_server(&server_name);
+                    failed_servers.push(error.discovery_failure(&server_name));
+                }
+            }
+        }
+
+        let degraded_failed_servers = failed_servers
+            .iter()
+            .map(|failure| McpFailedServer {
+                server_name: failure.server_name.clone(),
+                phase: failure.phase,
+                error: McpErrorSurface::new(
+                    failure.phase,
+                    Some(failure.server_name.clone()),
+                    failure.error.clone(),
+                    failure.context.clone(),
+                    failure.recoverable,
+                ),
+            })
+            .chain(
+                self.unsupported_servers
+                    .iter()
+                    .map(unsupported_server_failed_server),
+            )
+            .collect::<Vec<_>>();
+        let degraded_startup = (!working_servers.is_empty() && !degraded_failed_servers.is_empty())
+            .then(|| {
+                McpDegradedReport::new(
+                    working_servers,
+                    degraded_failed_servers,
+                    discovered_tools
+                        .iter()
+                        .map(|tool| tool.qualified_name.clone())
+                        .collect(),
+                    Vec::new(),
+                )
+            });
+
+        McpToolDiscoveryReport {
+            tools: discovered_tools,
+            failed_servers,
+            unsupported_servers: self.unsupported_servers.clone(),
+            degraded_startup,
+        }
+    }
+
     pub async fn call_tool(
         &mut self,
         qualified_tool_name: &str,
@@ -467,6 +668,53 @@ impl McpServerManager {
                     .await?
             };
         Ok(response)
+    }
+
+    pub async fn list_resources(
+        &mut self,
+        server_name: &str,
+    ) -> Result<McpListResourcesResult, McpServerManagerError> {
+        let mut attempts = 0;
+
+        loop {
+            match self.list_resources_once(server_name).await {
+                Ok(resources) => return Ok(resources),
+                Err(error) if attempts == 0 && Self::is_retryable_error(&error) => {
+                    self.reset_server(server_name).await?;
+                    attempts += 1;
+                }
+                Err(error) => {
+                    if Self::should_reset_server(&error) {
+                        self.reset_server(server_name).await?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    pub async fn read_resource(
+        &mut self,
+        server_name: &str,
+        uri: &str,
+    ) -> Result<McpReadResourceResult, McpServerManagerError> {
+        let mut attempts = 0;
+
+        loop {
+            match self.read_resource_once(server_name, uri).await {
+                Ok(resource) => return Ok(resource),
+                Err(error) if attempts == 0 && Self::is_retryable_error(&error) => {
+                    self.reset_server(server_name).await?;
+                    attempts += 1;
+                }
+                Err(error) => {
+                    if Self::should_reset_server(&error) {
+                        self.reset_server(server_name).await?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
     }
 
     pub async fn shutdown(&mut self) -> Result<(), McpServerManagerError> {
@@ -823,11 +1071,12 @@ mod tests {
     use crate::mcp_client::McpClientBootstrap;
 
     use super::{
-        spawn_mcp_stdio_process, JsonRpcId, JsonRpcRequest, JsonRpcResponse,
-        McpInitializeClientInfo, McpInitializeParams, McpInitializeResult, McpInitializeServerInfo,
-        McpListToolsResult, McpReadResourceParams, McpReadResourceResult, McpServerManager,
-        McpServerManagerError, McpStdioProcess, McpTool, McpToolCallParams,
+        spawn_mcp_stdio_process, unsupported_server_failed_server, JsonRpcId, JsonRpcRequest,
+        JsonRpcResponse, McpInitializeClientInfo, McpInitializeParams, McpInitializeResult,
+        McpInitializeServerInfo, McpListToolsResult, McpReadResourceParams, McpReadResourceResult,
+        McpServerManager, McpServerManagerError, McpStdioProcess, McpTool, McpToolCallParams,
     };
+    use crate::McpLifecyclePhase;
 
     fn temp_dir() -> PathBuf {
         let nanos = SystemTime::now()
@@ -1611,6 +1860,10 @@ mod tests {
         assert_eq!(unsupported[0].server_name, "http");
         assert_eq!(unsupported[1].server_name, "sdk");
         assert_eq!(unsupported[2].server_name, "ws");
+        assert_eq!(
+            unsupported_server_failed_server(&unsupported[0]).phase,
+            McpLifecyclePhase::ServerRegistration
+        );
     }
 
     #[test]

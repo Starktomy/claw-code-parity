@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use crate::json::JsonValue;
 use crate::sandbox::{FilesystemIsolationMode, SandboxConfig};
 
+/// Schema name advertised by generated settings files.
 pub const CLAW_SETTINGS_SCHEMA_NAME: &str = "SettingsSchema";
 
+/// Origin of a loaded settings file in the configuration precedence chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConfigSource {
     User,
@@ -15,6 +17,7 @@ pub enum ConfigSource {
     Local,
 }
 
+/// Effective permission mode after decoding config values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedPermissionMode {
     ReadOnly,
@@ -22,12 +25,14 @@ pub enum ResolvedPermissionMode {
     DangerFullAccess,
 }
 
+/// A discovered config file and the scope it contributes to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigEntry {
     pub source: ConfigSource,
     pub path: PathBuf,
 }
 
+/// Fully merged runtime configuration plus parsed feature-specific views.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
     merged: BTreeMap<String, JsonValue>,
@@ -35,6 +40,7 @@ pub struct RuntimeConfig {
     feature_config: RuntimeFeatureConfig,
 }
 
+/// Parsed plugin-related settings extracted from runtime config.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimePluginConfig {
     enabled_plugins: BTreeMap<String, bool>,
@@ -44,6 +50,7 @@ pub struct RuntimePluginConfig {
     bundled_root: Option<String>,
 }
 
+/// Structured feature configuration consumed by runtime subsystems.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeFeatureConfig {
     hooks: RuntimeHookConfig,
@@ -51,27 +58,42 @@ pub struct RuntimeFeatureConfig {
     mcp: McpConfigCollection,
     oauth: Option<OAuthConfig>,
     model: Option<String>,
+    aliases: BTreeMap<String, String>,
     permission_mode: Option<ResolvedPermissionMode>,
     sandbox: SandboxConfig,
+    provider_fallbacks: ProviderFallbackConfig,
 }
 
+/// Ordered chain of fallback model identifiers used when the primary
+/// provider returns a retryable failure (429/500/503/etc.). The chain is
+/// strict: each entry is tried in order until one succeeds.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProviderFallbackConfig {
+    primary: Option<String>,
+    fallbacks: Vec<String>,
+}
+
+/// Hook command lists grouped by lifecycle stage.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeHookConfig {
     pre_tool_use: Vec<String>,
     post_tool_use: Vec<String>,
 }
 
+/// Collection of configured MCP servers after scope-aware merging.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct McpConfigCollection {
     servers: BTreeMap<String, ScopedMcpServerConfig>,
 }
 
+/// MCP server config paired with the scope that defined it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedMcpServerConfig {
     pub scope: ConfigSource,
     pub config: McpServerConfig,
 }
 
+/// Transport families supported by configured MCP servers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpTransport {
     Stdio,
@@ -82,6 +104,7 @@ pub enum McpTransport {
     ManagedProxy,
 }
 
+/// Scope-normalized MCP server configuration variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpServerConfig {
     Stdio(McpStdioServerConfig),
@@ -92,6 +115,7 @@ pub enum McpServerConfig {
     ManagedProxy(McpManagedProxyServerConfig),
 }
 
+/// Configuration for an MCP server launched as a local stdio process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpStdioServerConfig {
     pub command: String,
@@ -99,6 +123,7 @@ pub struct McpStdioServerConfig {
     pub env: BTreeMap<String, String>,
 }
 
+/// Configuration for an MCP server reached over HTTP or SSE.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpRemoteServerConfig {
     pub url: String,
@@ -107,6 +132,7 @@ pub struct McpRemoteServerConfig {
     pub oauth: Option<McpOAuthConfig>,
 }
 
+/// Configuration for an MCP server reached over WebSocket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpWebSocketServerConfig {
     pub url: String,
@@ -114,17 +140,20 @@ pub struct McpWebSocketServerConfig {
     pub headers_helper: Option<String>,
 }
 
+/// Configuration for an MCP server addressed through an SDK name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpSdkServerConfig {
     pub name: String,
 }
 
+/// Configuration for an MCP managed-proxy endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpManagedProxyServerConfig {
     pub url: String,
     pub id: String,
 }
 
+/// OAuth overrides associated with a remote MCP server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpOAuthConfig {
     pub client_id: Option<String>,
@@ -133,6 +162,7 @@ pub struct McpOAuthConfig {
     pub xaa: Option<bool>,
 }
 
+/// OAuth client configuration used by the main Claw runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthConfig {
     pub client_id: String,
@@ -143,6 +173,7 @@ pub struct OAuthConfig {
     pub scopes: Vec<String>,
 }
 
+/// Errors raised while reading or parsing runtime configuration files.
 #[derive(Debug)]
 pub enum ConfigError {
     Io(std::io::Error),
@@ -166,6 +197,7 @@ impl From<std::io::Error> for ConfigError {
     }
 }
 
+/// Discovers config files and merges them into a [`RuntimeConfig`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigLoader {
     cwd: PathBuf,
@@ -232,6 +264,7 @@ impl ConfigLoader {
             let Some(value) = read_optional_json_object(&entry.path)? else {
                 continue;
             };
+            validate_optional_hooks_config(&value, &entry.path)?;
             merge_mcp_servers(&mut mcp_servers, entry.source, &value, &entry.path)?;
             deep_merge_objects(&mut merged, &value);
             loaded_entries.push(entry);
@@ -247,8 +280,10 @@ impl ConfigLoader {
             },
             oauth: parse_optional_oauth_config(&merged_value, "merged settings.oauth")?,
             model: parse_optional_model(&merged_value),
+            aliases: parse_optional_aliases(&merged_value)?,
             permission_mode: parse_optional_permission_mode(&merged_value)?,
             sandbox: parse_optional_sandbox_config(&merged_value)?,
+            provider_fallbacks: parse_optional_provider_fallbacks(&merged_value)?,
         };
 
         Ok(RuntimeConfig {
@@ -320,6 +355,11 @@ impl RuntimeConfig {
     }
 
     #[must_use]
+    pub fn aliases(&self) -> &BTreeMap<String, String> {
+        &self.feature_config.aliases
+    }
+
+    #[must_use]
     pub fn permission_mode(&self) -> Option<ResolvedPermissionMode> {
         self.feature_config.permission_mode
     }
@@ -327,6 +367,11 @@ impl RuntimeConfig {
     #[must_use]
     pub fn sandbox(&self) -> &SandboxConfig {
         &self.feature_config.sandbox
+    }
+
+    #[must_use]
+    pub fn provider_fallbacks(&self) -> &ProviderFallbackConfig {
+        &self.feature_config.provider_fallbacks
     }
 }
 
@@ -369,6 +414,11 @@ impl RuntimeFeatureConfig {
     }
 
     #[must_use]
+    pub fn aliases(&self) -> &BTreeMap<String, String> {
+        &self.aliases
+    }
+
+    #[must_use]
     pub fn permission_mode(&self) -> Option<ResolvedPermissionMode> {
         self.permission_mode
     }
@@ -376,6 +426,33 @@ impl RuntimeFeatureConfig {
     #[must_use]
     pub fn sandbox(&self) -> &SandboxConfig {
         &self.sandbox
+    }
+
+    #[must_use]
+    pub fn provider_fallbacks(&self) -> &ProviderFallbackConfig {
+        &self.provider_fallbacks
+    }
+}
+
+impl ProviderFallbackConfig {
+    #[must_use]
+    pub fn new(primary: Option<String>, fallbacks: Vec<String>) -> Self {
+        Self { primary, fallbacks }
+    }
+
+    #[must_use]
+    pub fn primary(&self) -> Option<&str> {
+        self.primary.as_deref()
+    }
+
+    #[must_use]
+    pub fn fallbacks(&self) -> &[String] {
+        &self.fallbacks
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.fallbacks.is_empty()
     }
 }
 
@@ -419,6 +496,7 @@ impl RuntimePluginConfig {
 }
 
 #[must_use]
+/// Returns the default per-user config directory used by the runtime.
 pub fn default_config_home() -> PathBuf {
     std::env::var_os("CLAW_CONFIG_HOME")
         .map(PathBuf::from)
@@ -556,16 +634,32 @@ fn parse_optional_model(root: &JsonValue) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn parse_optional_aliases(root: &JsonValue) -> Result<BTreeMap<String, String>, ConfigError> {
+    let Some(object) = root.as_object() else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(optional_string_map(object, "aliases", "merged settings")?.unwrap_or_default())
+}
+
 fn parse_optional_hooks_config(root: &JsonValue) -> Result<RuntimeHookConfig, ConfigError> {
     let Some(object) = root.as_object() else {
         return Ok(RuntimeHookConfig::default());
     };
+    parse_optional_hooks_config_object(object, "merged settings.hooks")
+}
+
+fn parse_optional_hooks_config_object(
+    object: &BTreeMap<String, JsonValue>,
+    context: &str,
+) -> Result<RuntimeHookConfig, ConfigError> {
     let Some(hooks_value) = object.get("hooks") else {
         return Ok(RuntimeHookConfig::default());
     };
-    let hooks = expect_object(hooks_value, "merged settings.hooks")?;
+    let hooks = expect_object(hooks_value, context)?;
     Ok(RuntimeHookConfig {
-        pre_tool_use: optional_string_array(hooks, "PreToolUse", "merged settings.hooks")?
+        pre_tool_use: optional_string_array(hooks, "PreToolUse", context)?.unwrap_or_default(),
+        post_tool_use: optional_string_array(hooks, "PostToolUse", context)?.unwrap_or_default(),
+        post_tool_use_failure: optional_string_array(hooks, "PostToolUseFailure", context)?
             .unwrap_or_default(),
         post_tool_use: optional_string_array(hooks, "PostToolUse", "merged settings.hooks")?
             .unwrap_or_default(),
@@ -661,6 +755,23 @@ fn parse_optional_sandbox_config(root: &JsonValue) -> Result<SandboxConfig, Conf
     })
 }
 
+fn parse_optional_provider_fallbacks(
+    root: &JsonValue,
+) -> Result<ProviderFallbackConfig, ConfigError> {
+    let Some(object) = root.as_object() else {
+        return Ok(ProviderFallbackConfig::default());
+    };
+    let Some(value) = object.get("providerFallbacks") else {
+        return Ok(ProviderFallbackConfig::default());
+    };
+    let entry = expect_object(value, "merged settings.providerFallbacks")?;
+    let primary =
+        optional_string(entry, "primary", "merged settings.providerFallbacks")?.map(str::to_string);
+    let fallbacks = optional_string_array(entry, "fallbacks", "merged settings.providerFallbacks")?
+        .unwrap_or_default();
+    Ok(ProviderFallbackConfig { primary, fallbacks })
+}
+
 fn parse_filesystem_mode_label(value: &str) -> Result<FilesystemIsolationMode, ConfigError> {
     match value {
         "off" => Ok(FilesystemIsolationMode::Off),
@@ -703,7 +814,8 @@ fn parse_mcp_server_config(
     context: &str,
 ) -> Result<McpServerConfig, ConfigError> {
     let object = expect_object(value, context)?;
-    let server_type = optional_string(object, "type", context)?.unwrap_or("stdio");
+    let server_type =
+        optional_string(object, "type", context)?.unwrap_or_else(|| infer_mcp_server_type(object));
     match server_type {
         "stdio" => Ok(McpServerConfig::Stdio(McpStdioServerConfig {
             command: expect_string(object, "command", context)?.to_string(),
@@ -731,6 +843,14 @@ fn parse_mcp_server_config(
         other => Err(ConfigError::Parse(format!(
             "{context}: unsupported MCP server type for {server_name}: {other}"
         ))),
+    }
+}
+
+fn infer_mcp_server_type(object: &BTreeMap<String, JsonValue>) -> &'static str {
+    if object.contains_key("url") {
+        "http"
+    } else {
+        "stdio"
     }
 }
 
@@ -1089,6 +1209,66 @@ mod tests {
     }
 
     #[test]
+    fn parses_provider_fallbacks_chain_with_primary_and_ordered_fallbacks() {
+        // given
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".claw");
+        fs::create_dir_all(cwd.join(".claw")).expect("project config dir");
+        fs::create_dir_all(&home).expect("home config dir");
+        fs::write(
+            home.join("settings.json"),
+            r#"{
+              "providerFallbacks": {
+                "primary": "claude-opus-4-6",
+                "fallbacks": ["grok-3", "grok-3-mini"]
+              }
+            }"#,
+        )
+        .expect("write provider fallback settings");
+
+        // when
+        let loaded = ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("config should load");
+
+        // then
+        let chain = loaded.provider_fallbacks();
+        assert_eq!(chain.primary(), Some("claude-opus-4-6"));
+        assert_eq!(
+            chain.fallbacks(),
+            &["grok-3".to_string(), "grok-3-mini".to_string()]
+        );
+        assert!(!chain.is_empty());
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn provider_fallbacks_default_is_empty_when_unset() {
+        // given
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".claw");
+        fs::create_dir_all(&home).expect("home config dir");
+        fs::create_dir_all(&cwd).expect("project dir");
+        fs::write(home.join("settings.json"), "{}").expect("write empty settings");
+
+        // when
+        let loaded = ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("config should load");
+
+        // then
+        let chain = loaded.provider_fallbacks();
+        assert_eq!(chain.primary(), None);
+        assert!(chain.fallbacks().is_empty());
+        assert!(chain.is_empty());
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
     fn parses_typed_mcp_and_oauth_config() {
         let root = temp_dir();
         let cwd = root.join("project");
@@ -1175,6 +1355,44 @@ mod tests {
         assert_eq!(oauth.client_id, "runtime-client");
         assert_eq!(oauth.callback_port, Some(54_545));
         assert_eq!(oauth.scopes, vec!["org:read", "user:write"]);
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn infers_http_mcp_servers_from_url_only_config() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".claw");
+        fs::create_dir_all(&home).expect("home config dir");
+        fs::create_dir_all(&cwd).expect("project dir");
+        fs::write(
+            home.join("settings.json"),
+            r#"{
+              "mcpServers": {
+                "remote": {
+                  "url": "https://example.test/mcp"
+                }
+              }
+            }"#,
+        )
+        .expect("write mcp settings");
+
+        let loaded = ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("config should load");
+
+        let remote_server = loaded
+            .mcp()
+            .get("remote")
+            .expect("remote server should exist");
+        assert_eq!(remote_server.transport(), McpTransport::Http);
+        match &remote_server.config {
+            McpServerConfig::Http(config) => {
+                assert_eq!(config.url, "https://example.test/mcp");
+            }
+            other => panic!("expected http config, got {other:?}"),
+        }
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }

@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::ApiError;
+use crate::http_client::build_http_client_or_default;
 use crate::types::{
     ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
     InputContentBlock, InputMessage, MessageDelta, MessageDeltaEvent, MessageRequest,
@@ -12,15 +14,15 @@ use crate::types::{
     ToolChoice, ToolDefinition, ToolResultContentBlock, Usage,
 };
 
-use super::{Provider, ProviderFuture};
+use super::{preflight_message_request, Provider, ProviderFuture};
 
 pub const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1";
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const REQUEST_ID_HEADER: &str = "request-id";
 const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
-const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
-const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(2);
-const DEFAULT_MAX_RETRIES: u32 = 2;
+const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(128);
+const DEFAULT_MAX_RETRIES: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenAiCompatConfig {
@@ -67,6 +69,7 @@ impl OpenAiCompatConfig {
 pub struct OpenAiCompatClient {
     http: reqwest::Client,
     api_key: String,
+    config: OpenAiCompatConfig,
     base_url: String,
     max_retries: u32,
     initial_backoff: Duration,
@@ -74,11 +77,15 @@ pub struct OpenAiCompatClient {
 }
 
 impl OpenAiCompatClient {
+    const fn config(&self) -> OpenAiCompatConfig {
+        self.config
+    }
     #[must_use]
     pub fn new(api_key: impl Into<String>, config: OpenAiCompatConfig) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: build_http_client_or_default(),
             api_key: api_key.into(),
+            config,
             base_url: read_base_url(config),
             max_retries: DEFAULT_MAX_RETRIES,
             initial_backoff: DEFAULT_INITIAL_BACKOFF,
@@ -123,9 +130,18 @@ impl OpenAiCompatClient {
             stream: false,
             ..request.clone()
         };
+        preflight_message_request(&request)?;
         let response = self.send_with_retry(&request).await?;
         let request_id = request_id_from_headers(response.headers());
-        let payload = response.json::<ChatCompletionResponse>().await?;
+        let body = response.text().await.map_err(ApiError::from)?;
+        let payload = serde_json::from_str::<ChatCompletionResponse>(&body).map_err(|error| {
+            ApiError::json_deserialize(
+                self.config.provider_name,
+                &request.model,
+                &body,
+                error,
+            )
+        })?;
         let mut normalized = normalize_response(&request.model, payload)?;
         if normalized.request_id.is_none() {
             normalized.request_id = request_id;
@@ -137,13 +153,17 @@ impl OpenAiCompatClient {
         &self,
         request: &MessageRequest,
     ) -> Result<MessageStream, ApiError> {
+        preflight_message_request(request)?;
         let response = self
             .send_with_retry(&request.clone().with_streaming())
             .await?;
         Ok(MessageStream {
             request_id: request_id_from_headers(response.headers()),
             response,
-            parser: OpenAiSseParser::new(),
+            parser: OpenAiSseParser::with_context(
+                self.config.provider_name,
+                request.model.clone(),
+            ),
             pending: VecDeque::new(),
             done: false,
             state: StreamState::new(request.model.clone()),
@@ -172,7 +192,7 @@ impl OpenAiCompatClient {
                 break retryable_error;
             }
 
-            tokio::time::sleep(self.backoff_for_attempt(attempts)?).await;
+            tokio::time::sleep(self.jittered_backoff_for_attempt(attempts)?).await;
         };
 
         Err(ApiError::RetriesExhausted {
@@ -190,7 +210,7 @@ impl OpenAiCompatClient {
             .post(&request_url)
             .header("content-type", "application/json")
             .bearer_auth(&self.api_key)
-            .json(&build_chat_completion_request(request))
+            .json(&build_chat_completion_request(request, self.config()))
             .send()
             .await
             .map_err(ApiError::from)
@@ -208,6 +228,37 @@ impl OpenAiCompatClient {
             .checked_mul(multiplier)
             .map_or(self.max_backoff, |delay| delay.min(self.max_backoff)))
     }
+
+    fn jittered_backoff_for_attempt(&self, attempt: u32) -> Result<Duration, ApiError> {
+        let base = self.backoff_for_attempt(attempt)?;
+        Ok(base + jitter_for_base(base))
+    }
+}
+
+/// Process-wide counter that guarantees distinct jitter samples even when
+/// the system clock resolution is coarser than consecutive retry sleeps.
+static JITTER_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Returns a random additive jitter in `[0, base]` to decorrelate retries
+/// from multiple concurrent clients. Entropy is drawn from the nanosecond
+/// wall clock mixed with a monotonic counter and run through a splitmix64
+/// finalizer; adequate for retry jitter (no cryptographic requirement).
+fn jitter_for_base(base: Duration) -> Duration {
+    let base_nanos = u64::try_from(base.as_nanos()).unwrap_or(u64::MAX);
+    if base_nanos == 0 {
+        return Duration::ZERO;
+    }
+    let raw_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let tick = JITTER_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut mixed = raw_nanos.wrapping_add(tick).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    mixed ^= mixed >> 31;
+    let jitter_nanos = mixed % base_nanos.saturating_add(1);
+    Duration::from_nanos(jitter_nanos)
 }
 
 impl Provider for OpenAiCompatClient {
@@ -275,11 +326,17 @@ impl MessageStream {
 #[derive(Debug, Default)]
 struct OpenAiSseParser {
     buffer: Vec<u8>,
+    provider: String,
+    model: String,
 }
 
 impl OpenAiSseParser {
-    fn new() -> Self {
-        Self::default()
+    fn with_context(provider: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            buffer: Vec::new(),
+            provider: provider.into(),
+            model: model.into(),
+        }
     }
 
     fn push(&mut self, chunk: &[u8]) -> Result<Vec<ChatCompletionChunk>, ApiError> {
@@ -287,7 +344,7 @@ impl OpenAiSseParser {
         let mut events = Vec::new();
 
         while let Some(frame) = next_sse_frame(&mut self.buffer) {
-            if let Some(event) = parse_sse_frame(&frame)? {
+            if let Some(event) = parse_sse_frame(&frame, &self.provider, &self.model)? {
                 events.push(event);
             }
         }
@@ -631,7 +688,7 @@ struct ErrorBody {
     message: Option<String>,
 }
 
-fn build_chat_completion_request(request: &MessageRequest) -> Value {
+fn build_chat_completion_request(request: &MessageRequest, config: OpenAiCompatConfig) -> Value {
     let mut messages = Vec::new();
     if let Some(system) = request.system.as_ref().filter(|value| !value.is_empty()) {
         messages.push(json!({
@@ -649,6 +706,10 @@ fn build_chat_completion_request(request: &MessageRequest) -> Value {
         "messages": messages,
         "stream": request.stream,
     });
+
+    if request.stream && should_request_stream_usage(config) {
+        payload["stream_options"] = json!({ "include_usage": true });
+    }
 
     if let Some(tools) = &request.tools {
         payload["tools"] =
@@ -747,6 +808,10 @@ fn openai_tool_choice(tool_choice: &ToolChoice) -> Value {
     }
 }
 
+fn should_request_stream_usage(config: OpenAiCompatConfig) -> bool {
+    matches!(config.provider_name, "OpenAI")
+}
+
 fn normalize_response(
     model: &str,
     response: ChatCompletionResponse,
@@ -818,7 +883,11 @@ fn next_sse_frame(buffer: &mut Vec<u8>) -> Option<String> {
     Some(String::from_utf8_lossy(&frame[..frame_len]).into_owned())
 }
 
-fn parse_sse_frame(frame: &str) -> Result<Option<ChatCompletionChunk>, ApiError> {
+fn parse_sse_frame(
+    frame: &str,
+    provider: &str,
+    model: &str,
+) -> Result<Option<ChatCompletionChunk>, ApiError> {
     let trimmed = frame.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -840,15 +909,15 @@ fn parse_sse_frame(frame: &str) -> Result<Option<ChatCompletionChunk>, ApiError>
     if payload == "[DONE]" {
         return Ok(None);
     }
-    serde_json::from_str(&payload)
+    serde_json::from_str::<ChatCompletionChunk>(&payload)
         .map(Some)
-        .map_err(ApiError::from)
+        .map_err(|error| ApiError::json_deserialize(provider, model, &payload, error))
 }
 
 fn read_env_non_empty(key: &str) -> Result<Option<String>, ApiError> {
     match std::env::var(key) {
         Ok(value) if !value.is_empty() => Ok(Some(value)),
-        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(super::dotenv_value(key)),
         Err(error) => Err(ApiError::from(error)),
     }
 }
@@ -889,6 +958,7 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
         return Ok(response);
     }
 
+    let request_id = request_id_from_headers(response.headers());
     let body = response.text().await.unwrap_or_default();
     let parsed_error = serde_json::from_str::<ErrorEnvelope>(&body).ok();
     let retryable = is_retryable_status(status);
@@ -901,6 +971,7 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
         message: parsed_error
             .as_ref()
             .and_then(|error| error.error.message.clone()),
+        request_id,
         body,
         retryable,
     })
@@ -949,39 +1020,78 @@ mod tests {
 
     #[test]
     fn request_translation_uses_openai_compatible_shape() {
-        let payload = build_chat_completion_request(&MessageRequest {
-            model: "grok-3".to_string(),
-            max_tokens: 64,
-            messages: vec![InputMessage {
-                role: "user".to_string(),
-                content: vec![
-                    InputContentBlock::Text {
-                        text: "hello".to_string(),
-                    },
-                    InputContentBlock::ToolResult {
-                        tool_use_id: "tool_1".to_string(),
-                        content: vec![ToolResultContentBlock::Json {
-                            value: json!({"ok": true}),
-                        }],
-                        is_error: false,
-                    },
-                ],
-            }],
-            system: Some("be helpful".to_string()),
-            tools: Some(vec![ToolDefinition {
-                name: "weather".to_string(),
-                description: Some("Get weather".to_string()),
-                input_schema: json!({"type": "object"}),
-            }]),
-            tool_choice: Some(ToolChoice::Auto),
-            stream: false,
-        });
+        let payload = build_chat_completion_request(
+            &MessageRequest {
+                model: "grok-3".to_string(),
+                max_tokens: 64,
+                messages: vec![InputMessage {
+                    role: "user".to_string(),
+                    content: vec![
+                        InputContentBlock::Text {
+                            text: "hello".to_string(),
+                        },
+                        InputContentBlock::ToolResult {
+                            tool_use_id: "tool_1".to_string(),
+                            content: vec![ToolResultContentBlock::Json {
+                                value: json!({"ok": true}),
+                            }],
+                            is_error: false,
+                        },
+                    ],
+                }],
+                system: Some("be helpful".to_string()),
+                tools: Some(vec![ToolDefinition {
+                    name: "weather".to_string(),
+                    description: Some("Get weather".to_string()),
+                    input_schema: json!({"type": "object"}),
+                }]),
+                tool_choice: Some(ToolChoice::Auto),
+                stream: false,
+            },
+            OpenAiCompatConfig::xai(),
+        );
 
         assert_eq!(payload["messages"][0]["role"], json!("system"));
         assert_eq!(payload["messages"][1]["role"], json!("user"));
         assert_eq!(payload["messages"][2]["role"], json!("tool"));
         assert_eq!(payload["tools"][0]["type"], json!("function"));
         assert_eq!(payload["tool_choice"], json!("auto"));
+    }
+
+    #[test]
+    fn openai_streaming_requests_include_usage_opt_in() {
+        let payload = build_chat_completion_request(
+            &MessageRequest {
+                model: "gpt-5".to_string(),
+                max_tokens: 64,
+                messages: vec![InputMessage::user_text("hello")],
+                system: None,
+                tools: None,
+                tool_choice: None,
+                stream: true,
+            },
+            OpenAiCompatConfig::openai(),
+        );
+
+        assert_eq!(payload["stream_options"], json!({"include_usage": true}));
+    }
+
+    #[test]
+    fn xai_streaming_requests_skip_openai_specific_usage_opt_in() {
+        let payload = build_chat_completion_request(
+            &MessageRequest {
+                model: "grok-3".to_string(),
+                max_tokens: 64,
+                messages: vec![InputMessage::user_text("hello")],
+                system: None,
+                tools: None,
+                tool_choice: None,
+                stream: true,
+            },
+            OpenAiCompatConfig::xai(),
+        );
+
+        assert!(payload.get("stream_options").is_none());
     }
 
     #[test]

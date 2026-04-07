@@ -6,6 +6,7 @@ const COMPACT_CONTINUATION_PREAMBLE: &str =
 const COMPACT_RECENT_MESSAGES_NOTE: &str = "Recent messages are preserved verbatim.";
 const COMPACT_DIRECT_RESUME_INSTRUCTION: &str = "Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, and do not preface with continuation text.";
 
+/// Thresholds controlling when and how a session is compacted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactionConfig {
     pub preserve_recent_messages: usize,
@@ -21,6 +22,7 @@ impl Default for CompactionConfig {
     }
 }
 
+/// Result of compacting a session into a summary plus preserved tail messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionResult {
     pub summary: String,
@@ -29,11 +31,13 @@ pub struct CompactionResult {
     pub removed_message_count: usize,
 }
 
+/// Roughly estimates the token footprint of the current session transcript.
 #[must_use]
 pub fn estimate_session_tokens(session: &Session) -> usize {
     session.messages.iter().map(estimate_message_tokens).sum()
 }
 
+/// Returns `true` when the session exceeds the configured compaction budget.
 #[must_use]
 pub fn should_compact(session: &Session, config: CompactionConfig) -> bool {
     let start = compacted_summary_prefix_len(session);
@@ -47,6 +51,7 @@ pub fn should_compact(session: &Session, config: CompactionConfig) -> bool {
             >= config.max_estimated_tokens
 }
 
+/// Normalizes a compaction summary into user-facing continuation text.
 #[must_use]
 pub fn format_compact_summary(summary: &str) -> String {
     let without_analysis = strip_tag_block(summary, "analysis");
@@ -62,6 +67,7 @@ pub fn format_compact_summary(summary: &str) -> String {
     collapse_blank_lines(&formatted).trim().to_string()
 }
 
+/// Builds the synthetic system message used after session compaction.
 #[must_use]
 pub fn get_compact_continuation_message(
     summary: &str,
@@ -86,6 +92,7 @@ pub fn get_compact_continuation_message(
     base
 }
 
+/// Compacts a session by summarizing older messages and preserving the recent tail.
 #[must_use]
 pub fn compact_session(session: &Session, config: CompactionConfig) -> CompactionResult {
     if !should_compact(session, config) {

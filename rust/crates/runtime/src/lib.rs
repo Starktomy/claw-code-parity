@@ -1,21 +1,40 @@
+//! Core runtime primitives for the `claw` CLI and supporting crates.
+//!
+//! This crate owns session persistence, permission evaluation, prompt assembly,
+//! MCP plumbing, tool-facing file operations, and the core conversation loop
+//! that drives interactive and one-shot turns.
+
 mod bash;
+pub mod bash_validation;
 mod bootstrap;
+pub mod branch_lock;
 mod compact;
 mod config;
 mod conversation;
 mod file_ops;
+pub mod green_contract;
 mod hooks;
 mod json;
+mod lane_events;
+pub mod lsp_client;
 mod mcp;
 mod mcp_client;
+pub mod mcp_lifecycle_hardened;
+pub mod mcp_server;
 mod mcp_stdio;
+pub mod mcp_tool_bridge;
 mod oauth;
+pub mod permission_enforcer;
 mod permissions;
+pub mod plugin_lifecycle;
+mod policy_engine;
 mod prompt;
+pub mod recovery_recipes;
 mod remote;
 pub mod sandbox;
 mod session;
 mod usage;
+pub mod worker_boot;
 
 pub use lsp::{
     FileDiagnostics, LspContextEnrichment, LspError, LspManager, LspServerConfig,
@@ -23,6 +42,7 @@ pub use lsp::{
 };
 pub use bash::{execute_bash, BashCommandInput, BashCommandOutput};
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
+pub use branch_lock::{detect_branch_lock_collisions, BranchLockCollision, BranchLockIntent};
 pub use compact::{
     compact_session, estimate_session_tokens, format_compact_summary,
     get_compact_continuation_message, should_compact, CompactionConfig, CompactionResult,
@@ -53,13 +73,19 @@ pub use mcp_client::{
     McpManagedProxyTransport, McpClientAuth, McpClientBootstrap, McpClientTransport,
     McpRemoteTransport, McpSdkTransport, McpStdioTransport,
 };
+pub use mcp_lifecycle_hardened::{
+    McpDegradedReport, McpErrorSurface, McpFailedServer, McpLifecyclePhase, McpLifecycleState,
+    McpLifecycleValidator, McpPhaseResult,
+};
+pub use mcp_server::{McpServer, McpServerSpec, ToolCallHandler, MCP_SERVER_PROTOCOL_VERSION};
 pub use mcp_stdio::{
     spawn_mcp_stdio_process, JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse,
-    ManagedMcpTool, McpInitializeClientInfo, McpInitializeParams, McpInitializeResult,
-    McpInitializeServerInfo, McpListResourcesParams, McpListResourcesResult, McpListToolsParams,
-    McpListToolsResult, McpReadResourceParams, McpReadResourceResult, McpResource,
-    McpResourceContents, McpServerManager, McpServerManagerError, McpStdioProcess, McpTool,
-    McpToolCallContent, McpToolCallParams, McpToolCallResult, UnsupportedMcpServer,
+    ManagedMcpTool, McpDiscoveryFailure, McpInitializeClientInfo, McpInitializeParams,
+    McpInitializeResult, McpInitializeServerInfo, McpListResourcesParams, McpListResourcesResult,
+    McpListToolsParams, McpListToolsResult, McpReadResourceParams, McpReadResourceResult,
+    McpResource, McpResourceContents, McpServerManager, McpServerManagerError, McpStdioProcess,
+    McpTool, McpToolCallContent, McpToolCallParams, McpToolCallResult, McpToolDiscoveryReport,
+    UnsupportedMcpServer,
 };
 pub use oauth::{
     clear_oauth_credentials, code_challenge_s256, credentials_path, generate_pkce_pair,
@@ -72,9 +98,21 @@ pub use permissions::{
     PermissionMode, PermissionOutcome, PermissionPolicy, PermissionPromptDecision,
     PermissionPrompter, PermissionRequest,
 };
+pub use plugin_lifecycle::{
+    DegradedMode, DiscoveryResult, PluginHealthcheck, PluginLifecycle, PluginLifecycleEvent,
+    PluginState, ResourceInfo, ServerHealth, ServerStatus, ToolInfo,
+};
+pub use policy_engine::{
+    evaluate, DiffScope, GreenLevel, LaneBlocker, LaneContext, PolicyAction, PolicyCondition,
+    PolicyEngine, PolicyRule, ReconcileReason, ReviewStatus,
+};
 pub use prompt::{
     load_system_prompt, prepend_bullets, ContextFile, ProjectContext, PromptBuildError,
     SystemPromptBuilder, FRONTIER_MODEL_NAME, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+};
+pub use recovery_recipes::{
+    attempt_recovery, recipe_for, EscalationPolicy, FailureScenario, RecoveryContext,
+    RecoveryEvent, RecoveryRecipe, RecoveryResult, RecoveryStep,
 };
 pub use remote::{
     inherited_upstream_proxy_env, no_proxy_list, read_token, upstream_proxy_ws_url,
@@ -84,6 +122,10 @@ pub use remote::{
 pub use session::{ContentBlock, ConversationMessage, MessageRole, Session, SessionError};
 pub use usage::{
     format_usd, pricing_for_model, ModelPricing, TokenUsage, UsageCostEstimate, UsageTracker,
+};
+pub use worker_boot::{
+    Worker, WorkerEvent, WorkerEventKind, WorkerEventPayload, WorkerFailure, WorkerFailureKind,
+    WorkerPromptTarget, WorkerReadySnapshot, WorkerRegistry, WorkerStatus, WorkerTrustResolution,
 };
 
 #[cfg(test)]

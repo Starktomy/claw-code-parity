@@ -6,6 +6,7 @@ use std::process::Command;
 use crate::config::{ConfigError, ConfigLoader, RuntimeConfig};
 use lsp::LspContextEnrichment;
 
+/// Errors raised while assembling the final system prompt.
 #[derive(Debug)]
 pub enum PromptBuildError {
     Io(std::io::Error),
@@ -35,23 +36,27 @@ impl From<ConfigError> for PromptBuildError {
     }
 }
 
+/// Marker separating static prompt scaffolding from dynamic runtime context.
 pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 pub const FRONTIER_MODEL_NAME: &str = "Opus 4.6";
 const MAX_INSTRUCTION_FILE_CHARS: usize = 4_000;
 const MAX_TOTAL_INSTRUCTION_CHARS: usize = 12_000;
 
+/// Contents of an instruction file included in prompt construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextFile {
     pub path: PathBuf,
     pub content: String,
 }
 
+/// Project-local context injected into the rendered system prompt.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectContext {
     pub cwd: PathBuf,
     pub current_date: String,
     pub git_status: Option<String>,
     pub git_diff: Option<String>,
+    pub git_recent_commits: Option<String>,
     pub instruction_files: Vec<ContextFile>,
 }
 
@@ -67,6 +72,7 @@ impl ProjectContext {
             current_date: current_date.into(),
             git_status: None,
             git_diff: None,
+            git_recent_commits: None,
             instruction_files,
         })
     }
@@ -78,10 +84,12 @@ impl ProjectContext {
         let mut context = Self::discover(cwd, current_date)?;
         context.git_status = read_git_status(&context.cwd);
         context.git_diff = read_git_diff(&context.cwd);
+        context.git_recent_commits = read_git_recent_commits(&context.cwd);
         Ok(context)
     }
 }
 
+/// Builder for the runtime system prompt and dynamic environment sections.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SystemPromptBuilder {
     output_style_name: Option<String>,
@@ -194,6 +202,7 @@ impl SystemPromptBuilder {
     }
 }
 
+/// Formats each item as an indented bullet for prompt sections.
 #[must_use]
 pub fn prepend_bullets(items: Vec<String>) -> Vec<String> {
     items.into_iter().map(|item| format!(" - {item}")).collect()
@@ -237,6 +246,31 @@ fn push_context_file(files: &mut Vec<ContextFile>, path: PathBuf) -> std::io::Re
 fn read_git_status(cwd: &Path) -> Option<String> {
     let output = Command::new("git")
         .args(["--no-optional-locks", "status", "--short", "--branch"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn read_git_recent_commits(cwd: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args([
+            "--no-optional-locks",
+            "log",
+            "--oneline",
+            "--no-decorate",
+            "-n",
+            "5",
+        ])
         .current_dir(cwd)
         .output()
         .ok()?;
@@ -301,6 +335,11 @@ fn render_project_context(project_context: &ProjectContext) -> String {
         lines.push(String::new());
         lines.push("Git status snapshot:".to_string());
         lines.push(status.clone());
+    }
+    if let Some(commits) = &project_context.git_recent_commits {
+        lines.push(String::new());
+        lines.push("Recent commits (last 5):".to_string());
+        lines.push(commits.clone());
     }
     if let Some(diff) = &project_context.git_diff {
         lines.push(String::new());
@@ -411,6 +450,7 @@ fn collapse_blank_lines(content: &str) -> String {
     result
 }
 
+/// Loads config and project context, then renders the system prompt text.
 pub fn load_system_prompt(
     cwd: impl Into<PathBuf>,
     current_date: impl Into<String>,
@@ -629,6 +669,82 @@ mod tests {
         assert!(status.contains("?? CLAW.md"));
         assert!(status.contains("?? tracked.txt"));
         assert!(context.git_diff.is_none());
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn discover_with_git_includes_recent_commits_and_renders_them() {
+        // given: a git repo with three commits and a current branch
+        let _guard = env_lock();
+        ensure_valid_cwd();
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("root dir");
+        std::process::Command::new("git")
+            .args(["init", "--quiet", "-b", "main"])
+            .current_dir(&root)
+            .status()
+            .expect("git init should run");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "tests@example.com"])
+            .current_dir(&root)
+            .status()
+            .expect("git config email should run");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Runtime Prompt Tests"])
+            .current_dir(&root)
+            .status()
+            .expect("git config name should run");
+        for (file, message) in [
+            ("a.txt", "first commit"),
+            ("b.txt", "second commit"),
+            ("c.txt", "third commit"),
+        ] {
+            fs::write(root.join(file), "x\n").expect("write commit file");
+            std::process::Command::new("git")
+                .args(["add", file])
+                .current_dir(&root)
+                .status()
+                .expect("git add should run");
+            std::process::Command::new("git")
+                .args(["commit", "-m", message, "--quiet"])
+                .current_dir(&root)
+                .status()
+                .expect("git commit should run");
+        }
+        fs::write(root.join("d.txt"), "staged\n").expect("write staged file");
+        std::process::Command::new("git")
+            .args(["add", "d.txt"])
+            .current_dir(&root)
+            .status()
+            .expect("git add staged should run");
+
+        // when: discovering project context with git auto-include
+        let context =
+            ProjectContext::discover_with_git(&root, "2026-03-31").expect("context should load");
+        let rendered = SystemPromptBuilder::new()
+            .with_os("linux", "6.8")
+            .with_project_context(context.clone())
+            .render();
+
+        // then: branch, recent commits and staged files are present in context
+        let commits = context
+            .git_recent_commits
+            .as_deref()
+            .expect("recent commits should be present");
+        assert!(commits.contains("first commit"));
+        assert!(commits.contains("second commit"));
+        assert!(commits.contains("third commit"));
+        assert_eq!(commits.lines().count(), 3);
+
+        let status = context.git_status.as_deref().expect("status snapshot");
+        assert!(status.contains("## main"));
+        assert!(status.contains("A  d.txt"));
+
+        assert!(rendered.contains("Recent commits (last 5):"));
+        assert!(rendered.contains("first commit"));
+        assert!(rendered.contains("Git status snapshot:"));
+        assert!(rendered.contains("## main"));
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
